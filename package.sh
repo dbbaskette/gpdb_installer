@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Greenplum Installer Packaging Script
-# Creates a versioned tar.gz distribution package
+# Creates a versioned tar.gz distribution package and optionally creates a GitHub release
 
 set -e
 
@@ -36,6 +36,94 @@ get_version() {
     else
         log_error "VERSION file not found"
     fi
+}
+
+# Check if GitHub CLI is installed
+check_gh_cli() {
+    if ! command -v gh &> /dev/null; then
+        log_error "GitHub CLI (gh) is not installed. Please install it first: https://cli.github.com/"
+    fi
+}
+
+# Check if user is authenticated with GitHub
+check_gh_auth() {
+    if ! gh auth status &> /dev/null; then
+        log_error "Not authenticated with GitHub. Please run 'gh auth login' first"
+    fi
+}
+
+# Create GitHub release
+create_github_release() {
+    local version=$1
+    local package_name=$2
+    local release_notes=$3
+    
+    log_info "Creating GitHub release for version $version"
+    
+    # Check if release already exists
+    if gh release view "v$version" &> /dev/null; then
+        log_warn "Release v$version already exists. Updating..."
+        gh release edit "v$version" --notes "$release_notes"
+    else
+        # Create new release
+        gh release create "v$version" \
+            --title "GPDB Installer v$version" \
+            --notes "$release_notes" \
+            --draft=false \
+            --prerelease=false
+    fi
+    
+    log_success "GitHub release created/updated: v$version"
+}
+
+# Upload asset to GitHub release
+upload_github_asset() {
+    local version=$1
+    local package_name=$2
+    
+    log_info "Uploading $package_name to GitHub release v$version"
+    
+    # Upload the tar.gz file
+    gh release upload "v$version" "$package_name" --clobber
+    
+    log_success "Asset uploaded successfully: $package_name"
+}
+
+# Generate release notes
+generate_release_notes() {
+    local version=$1
+    
+    # Get the latest commit message
+    local latest_commit=$(git log -1 --pretty=format:"%s")
+    
+    # Get recent commits for changelog
+    local recent_commits=$(git log --oneline -10 | sed 's/^/- /')
+    
+    cat << EOF
+## GPDB Installer v$version
+
+### What's New
+- Automated Greenplum Database installation
+- Support for single-node and multi-node cluster configurations
+- Comprehensive preflight checks and validation
+- Interactive and non-interactive installation modes
+- Extensive testing and validation scripts
+
+### Installation
+1. Download the \`$package_name\` file
+2. Extract: \`tar -xzf $package_name\`
+3. Follow the README.md instructions
+
+### Recent Changes
+$recent_commits
+
+### System Requirements
+- RHEL/CentOS/Rocky Linux 7, 8, or 9
+- SSH access to target servers
+- Greenplum Database v7 installer RPM
+
+For detailed installation instructions, see the README.md file.
+EOF
 }
 
 # Create distribution directory
@@ -126,6 +214,8 @@ create_package() {
         echo "Failed to create package" >&2
         return 1
     fi
+    
+    echo "$package_name"
 }
 
 # Clean up distribution directory
@@ -139,6 +229,23 @@ cleanup() {
 
 # Main packaging function
 main() {
+    local create_release=false
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --release|-r)
+                create_release=true
+                shift
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_usage
+                exit 1
+                ;;
+        esac
+    done
+    
     echo -e "${COLOR_GREEN}Greenplum Installer Packaging Script${COLOR_RESET}"
     echo "=========================================="
     
@@ -153,23 +260,51 @@ main() {
     copy_files "$dist_dir"
     
     # Create package
-    create_package "$dist_dir" "$version"
+    local package_name=$(create_package "$dist_dir" "$version")
     
     # Cleanup
     cleanup "$dist_dir"
     
     echo ""
     log_success "Packaging completed successfully!"
-    log_info "Package: gpdb-installer-${version}.tar.gz"
-    log_info "Ready for distribution"
+    log_info "Package: $package_name"
+    
+    # Create GitHub release if requested
+    if [ "$create_release" = true ]; then
+        echo ""
+        log_info "Creating GitHub release..."
+        
+        # Check prerequisites
+        check_gh_cli
+        check_gh_auth
+        
+        # Generate release notes
+        local release_notes=$(generate_release_notes "$version" "$package_name")
+        
+        # Create release
+        create_github_release "$version" "$package_name" "$release_notes"
+        
+        # Upload asset
+        upload_github_asset "$version" "$package_name"
+        
+        log_success "GitHub release created successfully!"
+        log_info "Release URL: https://github.com/dbbaskette/gpdb_installer/releases/tag/v$version"
+    else
+        log_info "Ready for distribution"
+        log_info "Use --release flag to create a GitHub release"
+    fi
 }
 
 # Show usage
 show_usage() {
-    echo "Usage: $0"
+    echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Creates a versioned tar.gz package of the GPDB installer"
     echo "Version is read from the VERSION file"
+    echo ""
+    echo "OPTIONS:"
+    echo "  --release, -r    Create a GitHub release and upload the package"
+    echo "  --help, -h       Show this help message"
     echo ""
     echo "The package will include:"
     echo "- Main installer script (gpdb_installer.sh)"
@@ -177,6 +312,10 @@ show_usage() {
     echo "- Test scripts (test_installer.sh, dry_run_test.sh, etc.)"
     echo "- Configuration templates"
     echo "- Mock installer files"
+    echo ""
+    echo "Examples:"
+    echo "  $0                    # Create package only"
+    echo "  $0 --release          # Create package and GitHub release"
 }
 
 # Parse command line arguments
@@ -187,6 +326,9 @@ case "${1:-}" in
         ;;
     "")
         main
+        ;;
+    --release|-r)
+        main "$@"
         ;;
     *)
         log_error "Unknown option: $1"
