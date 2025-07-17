@@ -1,0 +1,35 @@
+# Generated packages
+*.tar.gz
+
+# Configuration files (may contain sensitive data)
+gpdb_config.conf
+
+# Installer files directory (contains actual Greenplum RPMs)
+files/*
+!files/.gitkeep
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Log files
+*.log
+
+# Backup files
+*.backup
+*.bak 
