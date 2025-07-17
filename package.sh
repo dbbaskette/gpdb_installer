@@ -206,9 +206,9 @@ create_package() {
         
         # List contents
         echo "Package contents:" >&2
-        tar -tzf "$package_name" | head -20
+        tar -tzf "$package_name" | head -20 >&2
         if [ $(tar -tzf "$package_name" | wc -l) -gt 20 ]; then
-            echo "... and $(($(tar -tzf "$package_name" | wc -l) - 20)) more files"
+            echo "... and $(($(tar -tzf "$package_name" | wc -l) - 20)) more files" >&2
         fi
     else
         echo "Failed to create package" >&2
