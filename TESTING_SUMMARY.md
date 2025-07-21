@@ -4,6 +4,8 @@
 
 The Greenplum installer has been completed and is ready for testing. All Phase 1 tasks have been implemented with comprehensive error handling and documentation.
 
+**Recent Fix**: Single-node SSH setup has been optimized to handle localhost access properly, avoiding the "No identities found" error that occurred when trying to copy SSH keys to the same host.
+
 ## What's Been Completed
 
 ### ✅ Core Functionality (Phase 1)

@@ -10,6 +10,9 @@ A comprehensive automation script for installing Greenplum Database v7 on one or
 - **Error Handling**: Comprehensive error checking and informative error messages
 - **Dry Run Mode**: Test the installation process without making changes
 - **Configuration Persistence**: Save and reuse configuration settings
+- **Red Hat Linux Compatible**: Optimized for RHEL/CentOS/Rocky Linux systems
+- **Remote Deployment**: Push scripts to remote servers via SSH
+- **GitHub Integration**: Create releases and upload packages automatically
 
 ## Prerequisites
 
@@ -25,9 +28,20 @@ A comprehensive automation script for installing Greenplum Database v7 on one or
 - `ssh` - For remote host communication
 - `rpm` - For package installation
 
+**Greenplum Dependencies** (installed automatically):
+- `apr` and `apr-util` - Apache Portable Runtime
+- `krb5-devel` - Kerberos development libraries
+- `libevent-devel` - Event notification library
+- `perl` - Perl programming language
+- `python3-psycopg2` - PostgreSQL adapter for Python
+- `python3.11` - Python 3.11 runtime
+- `readline-devel` - Readline development libraries
+
 ### Network Requirements
 - All hosts must be able to communicate via SSH
 - Passwordless SSH will be configured automatically
+- For single-node installations, SSH is configured for localhost access
+- For multi-node installations, SSH keys are distributed across all hosts
 - Port 5432 (PostgreSQL) must be available on the coordinator
 
 ## Installation
@@ -42,7 +56,14 @@ mkdir -p files
 # Example: greenplum-db-7.0.0-el7-x86_64.rpm
 ```
 
-### 2. Run the Installer
+### 2. Test Red Hat Compatibility (Optional)
+
+```bash
+# Test compatibility with Red Hat Linux systems
+./test_redhat_compatibility.sh
+```
+
+### 3. Run the Installer
 
 ```bash
 # Make the script executable
@@ -84,6 +105,64 @@ The installer will prompt you for the following information:
 ```bash
 ./gpdb_installer.sh --dry-run
 ```
+
+### Remote Deployment
+
+Deploy the installer to remote servers:
+
+```bash
+# Deploy to a single server
+./push_to_server.sh user@server1.example.com
+
+# Deploy to multiple servers
+./push_to_server.sh user@server1 user@server2 user@server3
+
+# Deploy with custom SSH key and target directory
+./push_to_server.sh --key-file ~/.ssh/id_rsa --target-dir /opt/gpdb_installer user@server1
+
+# Test deployment without actually doing it
+./push_to_server.sh --dry-run user@server1
+```
+
+### Package Creation and GitHub Release
+
+Create a distribution package and optionally create a GitHub release:
+
+```bash
+# Create package only
+./package.sh
+
+# Create package and GitHub release
+./package.sh --release
+```
+
+## Red Hat Linux Compatibility
+
+The installer has been optimized for Red Hat Linux systems (RHEL, CentOS, Rocky Linux):
+
+- **Memory Detection**: Uses `/proc/meminfo` instead of `free` command
+- **Disk Space**: Uses `df -k` for better compatibility
+- **Hostname**: Uses standard `hostname` command
+- **Package Management**: Optimized for RPM-based systems
+- **System Commands**: Compatible with Red Hat system utilities
+
+Run the compatibility test to verify your system:
+
+```bash
+./test_redhat_compatibility.sh
+```
+
+## Scripts Overview
+
+The installer includes several scripts for different purposes:
+
+- **gpdb_installer.sh**: Main installation script
+- **test_installer.sh**: Automated testing script
+- **dry_run_test.sh**: Comprehensive dry-run testing
+- **interactive_test.sh**: Interactive testing mode
+- **package.sh**: Package creation and GitHub release script
+- **push_to_server.sh**: Remote deployment script
+- **test_redhat_compatibility.sh**: Red Hat Linux compatibility testing
 
 ## Configuration File
 

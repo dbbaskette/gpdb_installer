@@ -118,9 +118,9 @@ main() {
     # Run tests
     for test in test_script_syntax test_configuration_creation test_config_file_format test_help_function test_invalid_option; do
         if $test; then
-            ((tests_passed++))
+            tests_passed=$((tests_passed + 1))
         else
-            ((tests_failed++))
+            tests_failed=$((tests_failed + 1))
         fi
         echo ""
     done

@@ -253,9 +253,9 @@ main() {
     for test in "${tests[@]}"; do
         echo ""
         if $test; then
-            ((tests_passed++))
+            tests_passed=$((tests_passed + 1))
         else
-            ((tests_failed++))
+            tests_failed=$((tests_failed + 1))
         fi
     done
     

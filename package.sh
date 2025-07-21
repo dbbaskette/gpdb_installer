@@ -165,6 +165,12 @@ copy_files() {
     cp dry_run_test.sh "$dist_dir/"
     cp interactive_test.sh "$dist_dir/"
     
+    # Deployment script
+    cp push_to_server.sh "$dist_dir/"
+    
+    # Compatibility test script
+    cp test_redhat_compatibility.sh "$dist_dir/"
+    
     # Configuration templates
     cp test_config.conf "$dist_dir/"
     
@@ -177,6 +183,8 @@ copy_files() {
     chmod +x "$dist_dir/test_installer.sh"
     chmod +x "$dist_dir/dry_run_test.sh"
     chmod +x "$dist_dir/interactive_test.sh"
+    chmod +x "$dist_dir/push_to_server.sh"
+    chmod +x "$dist_dir/test_redhat_compatibility.sh"
     
     echo "Files copied successfully" >&2
 }

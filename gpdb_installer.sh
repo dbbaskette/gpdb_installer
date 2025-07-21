@@ -1,659 +1,75 @@
 #!/bin/bash
 
-# Tanzu Data Intelligence Installer Script
-# Installs Greenplum Database v7 on one or more servers.
+# Tanzu Greenplum Database Installer v2.0
+# Refactored version with improved architecture and error handling
 
-# Exit immediately if a command exits with a non-zero status.
-set -e
+# Global configuration
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly LIB_DIR="$SCRIPT_DIR/lib"
+readonly CONFIG_FILE="gpdb_config.conf"
+readonly INSTALL_FILES_DIR="files"
 
-# --- Configuration ---
-CONFIG_FILE="gpdb_config.conf"
-INSTALL_FILES_DIR="files"
-
+# Global variables
 DRY_RUN=false
+PHASES=(
+    "Initialization:3"
+    "Pre-flight Checks:6"
+    "Host Setup:3"
+    "Greenplum Installation:4"
+    "Completion:1"
+)
 
-# --- Colors for beautiful output ---
-COLOR_RESET='\033[0m'
-COLOR_GREEN='\033[0;32m'
-COLOR_BLUE='\033[0;34m'
-COLOR_YELLOW='\033[0;33m'
-COLOR_RED='\033[0;31m'
+# Add RESET_STATE as a global variable
+RESET_STATE=false
 
-# --- Helper Functions for logging ---
-log_info() {
-    echo -e "${COLOR_BLUE}[INFO]${COLOR_RESET} $1"
+# Add CLEAN_MODE as a global variable
+CLEAN_MODE=false
+
+# GPHOME will be set dynamically after detecting Greenplum version
+# This ensures compatibility with official installation practices
+GPHOME=""
+export GPHOME
+
+# Load required libraries
+source "$LIB_DIR/error_handling.sh"
+source "$LIB_DIR/logging.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/validation.sh"
+source "$LIB_DIR/system.sh"
+source "$LIB_DIR/ssh.sh"
+source "$LIB_DIR/greenplum.sh"
+
+# Function to show help
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+OPTIONS:
+    --dry-run       Run in dry-run mode (no actual changes)
+    --config FILE   Use specific configuration file
+    --help          Show this help message
+    --version       Show version information
+    --force         Force a fresh install (clear state markers)
+    --reset         Alias for --force
+    --clean         Remove Greenplum and all data directories from all hosts, then exit
+
+EXAMPLES:
+    $0                    # Run with default configuration
+    $0 --dry-run          # Test run without making changes
+    $0 --config custom.conf  # Use custom configuration file
+    $0 --clean            # Remove Greenplum and all data on all hosts
+
+EOF
 }
 
-log_success() {
-    echo -e "${COLOR_GREEN}[SUCCESS]${COLOR_RESET} $1"
+# Function to show version
+show_version() {
+    echo "Tanzu Greenplum Database Installer v2.0"
+    echo "Refactored version with improved architecture"
 }
 
-log_warn() {
-    echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET} $1"
-}
-
-log_error() {
-    echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $1" >&2
-    exit 1
-}
-
-# --- Function to execute commands, respecting dry run ---
-execute_command() {
-    if $DRY_RUN; then
-        log_info "[DRY-RUN] Would execute: $@"
-    else
-        "$@"
-    fi
-}
-
-# --- Function to check if current user has sudo privileges ---
-check_sudo_privileges() {
-    log_info "Checking sudo privileges..."
-    if ! sudo -n true 2>/dev/null; then
-        log_error "This script requires sudo privileges. Please run as a user with sudo access."
-    fi
-    log_success "Sudo privileges confirmed."
-}
-
-# --- Function to check system resources ---
-check_system_resources() {
-    log_info "Checking system resources..."
-    
-    # Memory check (minimum 8GB, recommended 16GB)
-    local total_memory=$(free -m | awk 'NR==2{printf "%.0f", $2/1024}')
-    if [ "$total_memory" -lt 8 ]; then
-        log_error "Insufficient memory: ${total_memory}GB available, minimum 8GB required"
-    elif [ "$total_memory" -lt 16 ]; then
-        log_warn "Low memory: ${total_memory}GB available, 16GB recommended for production"
-    else
-        log_success "Memory check passed: ${total_memory}GB available"
-    fi
-    
-    # Disk space check (minimum 10GB free)
-    local free_space=$(df -BG "$GPDB_DATA_DIR" 2>/dev/null | awk 'NR==2{print $4}' | sed 's/G//' || echo "0")
-    if [ "$free_space" -lt 10 ]; then
-        log_error "Insufficient disk space: ${free_space}GB free, minimum 10GB required"
-    else
-        log_success "Disk space check passed: ${free_space}GB free"
-    fi
-}
-
-# --- Function to check Greenplum version compatibility ---
-check_greenplum_compatibility() {
-    log_info "Checking Greenplum version compatibility..."
-    
-    local installer_file=$(find "$INSTALL_FILES_DIR" -maxdepth 1 -type f -name "greenplum-db-*.el*.x86_64.rpm" 2>/dev/null | head -n1)
-    
-    if [ -n "$installer_file" ]; then
-        local gp_version=$(basename "$installer_file" | sed -n 's/greenplum-db-\([0-9]\+\.[0-9]\+\).*/\1/p')
-        local os_version=$(cat /etc/os-release 2>/dev/null | grep -E '^VERSION_ID=' | cut -d'=' -f2 | tr -d '"' | cut -d'.' -f1 || echo "unknown")
-        
-        log_info "Detected Greenplum version: $gp_version"
-        log_info "Detected OS version: $os_version"
-        
-        # Version compatibility checks
-        case "$gp_version" in
-            "7.0"|"7.1"|"7.2")
-                if [[ "$os_version" =~ ^(7|8|9)$ ]]; then
-                    log_success "Greenplum $gp_version is compatible with OS version $os_version"
-                else
-                    log_error "Greenplum $gp_version requires RHEL/CentOS/Rocky Linux 7, 8, or 9"
-                fi
-                ;;
-            *)
-                log_warn "Unknown Greenplum version $gp_version - compatibility not verified"
-                ;;
-        esac
-    else
-        log_warn "No Greenplum installer found - version compatibility not checked"
-    fi
-}
-
-# --- Function to check library versions ---
-check_library_versions() {
-    log_info "Checking required library versions..."
-    
-    # Check for required libraries
-    local required_libs=("libc.so.6" "libssl.so.1.1" "libcrypto.so.1.1")
-    
-    for lib in "${required_libs[@]}"; do
-        if ldconfig -p 2>/dev/null | grep -q "$lib"; then
-            log_success "Library $lib found"
-        else
-            log_warn "Library $lib not found - may cause installation issues"
-        fi
-    done
-    
-    # Check kernel parameters
-    local kernel_params=("vm.overcommit_memory" "vm.swappiness" "kernel.shmmax")
-    for param in "${kernel_params[@]}"; do
-        local value=$(sysctl -n "$param" 2>/dev/null || echo "not_set")
-        log_info "Kernel parameter $param: $value"
-    done
-}
-
-# --- Function to check network connectivity ---
-check_network_connectivity() {
-    log_info "Checking network connectivity between hosts..."
-    
-    local all_hosts=($(get_all_hosts))
-    
-    for host in "${all_hosts[@]}"; do
-        # Test basic connectivity
-        if ping -c 3 "$host" >/dev/null 2>&1; then
-            log_success "Host $host is reachable"
-        else
-            log_error "Host $host is not reachable"
-        fi
-        
-        # Test SSH connectivity (if not localhost)
-        if [[ "$host" != "$(hostname -s)" ]]; then
-            if ssh -o ConnectTimeout=10 -o BatchMode=yes "$host" "echo 'SSH test'" >/dev/null 2>&1; then
-                log_success "SSH to $host works"
-            else
-                log_warn "SSH to $host may have issues"
-            fi
-        else
-            log_info "Skipping SSH test for localhost"
-        fi
-    done
-}
-
-# --- Function to validate configuration ---
-validate_configuration() {
-    log_info "Validating configuration..."
-    
-    if [ -z "$GPDB_COORDINATOR_HOST" ]; then
-        log_error "Coordinator host is not set in configuration."
-    fi
-    
-    if [ ${#GPDB_SEGMENT_HOSTS[@]} -eq 0 ]; then
-        log_error "No segment hosts defined in configuration."
-    fi
-    
-    if [ -z "$GPDB_INSTALL_DIR" ]; then
-        log_error "Install directory is not set in configuration."
-    fi
-    
-    if [ -z "$GPDB_DATA_DIR" ]; then
-        log_error "Data directory is not set in configuration."
-    fi
-    
-    log_success "Configuration validation passed."
-}
-
-# --- Configuration Stage ---
-# Prompts the user for installation details and saves them to a config file.
-configure_installation() {
-    log_info "Starting configuration..."
-    if [ -f "$CONFIG_FILE" ]; then
-        log_info "Configuration file '$CONFIG_FILE' found."
-        read -p "Do you want to use the existing configuration? (y/n) [y]: " use_existing
-        use_existing=${use_existing:-y}
-        if [[ "$use_existing" == "y" || "$use_existing" == "Y" ]]; then
-            log_success "Using existing configuration."
-            return
-        fi
-    fi
-
-    log_info "No configuration found or re-configuration requested. Let's set it up."
-
-    # Using `hostname -s` provides a sensible default for single-node installs
-    read -p "Enter the coordinator hostname [$(hostname -s)]: " GPDB_COORDINATOR_HOST
-    GPDB_COORDINATOR_HOST=${GPDB_COORDINATOR_HOST:-$(hostname -s)}
-
-    read -p "Enter all segment hostnames (comma-separated, e.g., sdw1,sdw2): " GPDB_SEGMENT_HOSTS
-    if [ -z "$GPDB_SEGMENT_HOSTS" ]; then
-        log_info "No segment hosts entered. Assuming single-node installation on coordinator."
-        GPDB_SEGMENT_HOSTS=$GPDB_COORDINATOR_HOST
-    fi
-
-    read -p "Do you want to set up a standby coordinator? (y/n) [n]: " setup_standby
-    setup_standby=${setup_standby:-n}
-    GPDB_STANDBY_HOST=""
-    if [[ "$setup_standby" == "y" || "$setup_standby" == "Y" ]]; then
-        read -p "Enter the standby coordinator hostname: " GPDB_STANDBY_HOST
-        if [ -z "$GPDB_STANDBY_HOST" ]; then
-            log_error "Standby coordinator hostname cannot be empty."
-        fi
-    fi
-
-    read -p "Enter the Greenplum installation directory [/usr/local/greenplum-db]: " GPDB_INSTALL_DIR
-    GPDB_INSTALL_DIR=${GPDB_INSTALL_DIR:-/usr/local/greenplum-db}
-
-    read -p "Enter the primary data directory for segments [/data/primary]: " GPDB_DATA_DIR
-    GPDB_DATA_DIR=${GPDB_DATA_DIR:-/data/primary}
-
-    # Create the configuration file
-    cat > "$CONFIG_FILE" << EOL
-# Greenplum Database Installation Configuration
-# This file is auto-generated by the installer script.
-
-GPDB_COORDINATOR_HOST="$GPDB_COORDINATOR_HOST"
-GPDB_STANDBY_HOST="$GPDB_STANDBY_HOST"
-GPDB_SEGMENT_HOSTS=($(echo "$GPDB_SEGMENT_HOSTS" | tr ',' ' '))
-GPDB_INSTALL_DIR="$GPDB_INSTALL_DIR"
-GPDB_DATA_DIR="$GPDB_DATA_DIR"
-EOL
-
-    log_success "Configuration saved to '$CONFIG_FILE'."
-}
-
-# --- Installation Step Functions (Stubs) ---
-
-preflight_checks() {
-    log_info "--- Step 1: Running Enhanced Pre-flight Checks ---"
-
-    local coordinator_host="$GPDB_COORDINATOR_HOST"
-    local segment_hosts=("${GPDB_SEGMENT_HOSTS[@]}") # Create a local copy to avoid modifying the global array
-
-    # Add standby host to the list if it exists
-    if [ -n "$GPDB_STANDBY_HOST" ]; then
-        segment_hosts+=("$GPDB_STANDBY_HOST")
-    fi
-
-    local all_hosts=("${segment_hosts[@]}")
-
-    # Basic checks
-    check_os_compatibility "$all_hosts"
-    check_sudo_privileges
-    check_dependencies "$all_hosts"
-    
-    # Enhanced checks
-    check_system_resources
-    check_greenplum_compatibility
-    check_library_versions
-    check_network_connectivity
-
-    log_success "Enhanced pre-flight checks completed."
-}
-
-check_os_compatibility() {
-    local hosts=("${@}")
-    for host in "${hosts[@]}"; do
-        log_info "Checking OS compatibility on $host..."
-        local os_release=$(ssh $host "cat /etc/os-release 2>/dev/null || cat /usr/lib/os-release 2>/dev/null" | grep -E '^ID=' | cut -d'=' -f2 | tr -d '"')
-
-        if [[ "$os_release" =~ ^(centos|rhel|rocky)$ ]]; then
-            local os_version=$(ssh $host "cat /etc/os-release 2>/dev/null || cat /usr/lib/os-release 2>/dev/null" | grep -E '^VERSION_ID=' | cut -d'=' -f2 | tr -d '"' | cut -d'.' -f1)
-            if [[ "$os_version" =~ ^(7|8|9)$ ]]; then
-                log_info "OS $os_release $os_version is compatible on $host."
-            else
-                log_error "Incompatible OS version on $host: $os_release $os_version. Only CentOS/RHEL/Rocky Linux 7, 8, or 9 are supported."
-            fi
-        else
-            log_error "Unsupported OS on $host: $os_release. Only CentOS/RHEL/Rocky Linux are supported."
-        fi
-    done
-}
-
-check_dependencies() {
-    local hosts=("${@}")
-    # Add more dependencies as needed, e.g. 'tar', 'gzip'
-    local required_dependencies=("sshpass" "sudo")
-
-    for host in "${hosts[@]}"; do
-        for dep in "${required_dependencies[@]}"; do
-            # Special handling for sudo as it's often in /usr/bin or /usr/sbin
-            if [[ "$dep" == "sudo" ]]; then
-                log_info "Checking for dependency '$dep' on $host..."
-                ssh $host "command -v sudo" >/dev/null 2>&1 && continue
-                ssh $host "[ -f /usr/bin/sudo ]" >/dev/null 2>&1 && continue
-                log_error "Dependency '$dep' not found on $host. Please install it."
-            fi
-
-            # Special handling for sshpass - try to install if not found
-            if [[ "$dep" == "sshpass" ]]; then
-                log_info "Checking for dependency '$dep' on $host..."
-                if ssh $host "command -v $dep" >/dev/null 2>&1; then
-                    log_success "sshpass found on $host"
-                    continue
-                else
-                    log_warn "sshpass not found on $host. Attempting to install..."
-                    
-                    # Try to install sshpass using available package managers
-                    local install_script="
-                        if command -v yum >/dev/null 2>&1; then
-                            echo 'Installing sshpass using yum...'
-                            sudo yum install -y sshpass
-                        elif command -v dnf >/dev/null 2>&1; then
-                            echo 'Installing sshpass using dnf...'
-                            sudo dnf install -y sshpass
-                        elif command -v apt-get >/dev/null 2>&1; then
-                            echo 'Installing sshpass using apt-get...'
-                            sudo apt-get update && sudo apt-get install -y sshpass
-                        else
-                            echo 'No supported package manager found. Please install sshpass manually.'
-                            exit 1
-                        fi
-                    "
-                    
-                    if ssh $host "$install_script"; then
-                        log_success "sshpass installed successfully on $host"
-                    else
-                        log_error "Failed to install sshpass on $host. Please install it manually."
-                    fi
-                fi
-            fi
-
-            # For other dependencies, just check if they exist
-            log_info "Checking for dependency '$dep' on $host..."
-            ssh $host "command -v $dep" >/dev/null 2>&1 || log_error "Dependency '$dep' not found on $host. Please install it (e.g., 'yum install $dep' or 'apt-get install $dep')."
-        done
-    done
-}
-
-setup_hosts() {
-    log_info "--- Step 2: Setting Up Hosts (User, Directories, SSH) ---"
-
-    local all_hosts=($(get_all_hosts))
-
-    log_info "This script needs to perform actions as root on all hosts."
-    read -s -p "Please enter the password for a user with sudo access on all hosts: " SUDO_PASSWORD
-    echo "" # Newline after password input
-    if [ -z "$SUDO_PASSWORD" ]; then
-        log_error "Sudo password cannot be empty."
-    fi
-
-    log_info "A 'gpadmin' user will be created. Please provide a password for it."
-    read -s -p "Enter password for the new 'gpadmin' user: " GPADMIN_PASSWORD
-    echo ""
-    if [ -z "$GPADMIN_PASSWORD" ]; then
-        log_error "gpadmin password cannot be empty."
-    fi
-
-    local total_hosts=${#all_hosts[@]}
-    local current_host=0
-    
-    for host in "${all_hosts[@]}"; do
-        ((current_host++))
-        show_progress "Configuring hosts" "$current_host" "$total_hosts"
-        log_info_with_timestamp "Configuring host: $host"
-        create_gpadmin_user_and_dirs "$host" "$SUDO_PASSWORD" "$GPADMIN_PASSWORD"
-    done
-    echo "" # New line after progress bar
-
-    setup_passwordless_ssh "$GPADMIN_PASSWORD" "${all_hosts[@]}"
-
-    log_success "All hosts have been set up successfully."
-}
-
-get_all_hosts() {
-    local all_hosts_with_dupes=("$GPDB_COORDINATOR_HOST" "${GPDB_SEGMENT_HOSTS[@]}")
-    if [ -n "$GPDB_STANDBY_HOST" ]; then
-        all_hosts_with_dupes+=("$GPDB_STANDBY_HOST")
-    fi
-
-    # Return a unique, sorted list of hosts
-    echo "${all_hosts_with_dupes[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '
-}
-
-create_gpadmin_user_and_dirs() {
-    local host=$1
-    local sudo_pass=$2
-    local gpadmin_pass=$3
-
-    log_info "Creating 'gpadmin' user and data directories on $host..."
-
-    # Using a heredoc for the remote script is cleaner than a long one-liner.
-    local remote_script="
-        set -e
-        echo \"--- Running setup as root on $host ---\"
-        if ! getent group gpadmin > /dev/null; then
-            echo \"Creating group gpadmin...\"
-            groupadd gpadmin
-        else
-            echo \"Group gpadmin already exists.\"
-        fi
-
-        if ! id -u gpadmin > /dev/null 2>&1; then
-            echo \"Creating user gpadmin...\"
-            useradd -g gpadmin -m -d /home/gpadmin gpadmin
-        else
-            echo \"User gpadmin already exists.\"
-        fi
-
-        echo \"Setting password for gpadmin...\"
-        echo \"gpadmin:$gpadmin_pass\" | chpasswd
-
-        echo \"Creating directories...\"
-        mkdir -p \"$GPDB_INSTALL_DIR\" \"$GPDB_DATA_DIR\"
-        chown -R gpadmin:gpadmin \"$GPDB_INSTALL_DIR\" \"$GPDB_DATA_DIR\"
-        chmod 755 \"$GPDB_INSTALL_DIR\"
-        chmod 755 \"$GPDB_DATA_DIR\"
-        echo \"--- Root setup on $host complete ---\"
-    "
-
-    log_info "Executing remote script on $host:"
-    if ! execute_command ssh -t "$host" "echo '$sudo_pass' | sudo -S bash -c '$remote_script'"; then
-        log_error "Failed to create gpadmin user and directories on $host."
-        # The specific error message from the remote script is already captured and logged
-        # by the enhanced `execute_command` function.  No need to repeat it here.
-    fi
-
-}
-
-setup_passwordless_ssh() {
-    local gpadmin_pass=$1
-    shift
-    local all_hosts=("$@")
-    local coordinator_host="$GPDB_COORDINATOR_HOST"
-
-    log_info "Setting up passwordless SSH for 'gpadmin' from $coordinator_host..."
-
-    # Generate SSH key for gpadmin on the coordinator if it doesn't exist.
-    log_info "Generating SSH key for gpadmin user..."
-    if [ ! -f /home/gpadmin/.ssh/id_rsa ]; then
-        execute_command sudo -u gpadmin ssh-keygen -t rsa -N "" -f /home/gpadmin/.ssh/id_rsa || log_error "Failed to generate SSH key for gpadmin user."
-    else
-        log_info "SSH key already exists for gpadmin user."
-    fi
-
-    for host in "${all_hosts[@]}"; do
-        log_info "Copying SSH key to $host..."
-        if ! execute_command sshpass -p "$gpadmin_pass" ssh-copy-id -o StrictHostKeyChecking=no "gpadmin@$host"; then
-            log_error "Failed to copy SSH key to $host. Please ensure the gpadmin user exists and the password is correct."
-        fi
-    done
-
-    log_info "Scanning all host keys to prevent interactive prompts..."
-
-    # Create the known_hosts file if it doesn't exist
-    execute_command sudo -u gpadmin mkdir -p /home/gpadmin/.ssh
-    execute_command sudo -u gpadmin touch /home/gpadmin/.ssh/known_hosts
-
-    execute_command sudo -u gpadmin ssh-keyscan -H "${all_hosts[@]}" >> /home/gpadmin/.ssh/known_hosts
-    # Remove duplicate entries from known_hosts
-    sudo -u gpadmin sort -u /home/gpadmin/.ssh/known_hosts -o /home/gpadmin/.ssh/known_hosts
-}
-
-
-install_greenplum() {
-    log_info "--- Step 3: Installing Greenplum Binaries ---"
-
-    local all_hosts=($(get_all_hosts))
-
-    # --- 1. Detect Installer File ---
-    log_info "Looking for Greenplum installer in '$INSTALL_FILES_DIR'..."
-    local installer_file=$(find "$INSTALL_FILES_DIR" -maxdepth 1 -type f -name "greenplum-db-*.el*.x86_64.rpm" 2>/dev/null)
-    # Supports el7, el8, el9 for CentOS/RHEL/Rocky Linux
-
-    if [ -z "$installer_file" ]; then
-        log_error "No Greenplum installer found in '$INSTALL_FILES_DIR'. Please ensure the installer file (greenplum-db-*.el*.x86_64.rpm) is present."
-    elif [[ $(echo "$installer_file" | wc -l) -gt 1 ]]; then
-        log_warn "Multiple installer files found. Using the first one: $installer_file"
-        installer_file=$(echo "$installer_file" | head -n 1)
-    fi
-
-    log_success "Found installer: $(basename "$installer_file")"
-
-    # --- 2. Distribute Installer ---
-    for host in "${all_hosts[@]}"; do
-        if [[ "$host" != "$GPDB_COORDINATOR_HOST" ]]; then # No need to copy to coordinator if installing from there
-            log_info "Copying installer to $host..."
-            execute_command scp "$installer_file" "$host:$GPDB_INSTALL_DIR" || log_error "Failed to copy installer to $host."
-        fi
-    done
-
-    # --- 3. Install Binaries ---
-    local total_hosts=${#all_hosts[@]}
-    local current_host=0
-    
-    for host in "${all_hosts[@]}"; do
-        ((current_host++))
-        show_progress "Installing Greenplum binaries" "$current_host" "$total_hosts"
-        log_info_with_timestamp "Installing Greenplum on $host..."
-
-        local remote_installer_path="$GPDB_INSTALL_DIR/$(basename "$installer_file")"
-        if [[ "$host" == "$GPDB_COORDINATOR_HOST" ]]; then
-            remote_installer_path="$installer_file"  # Install directly if on coordinator and installer is already there
-        fi
-
-        # Check for existing Greenplum installation
-        if ssh "$host" "test -d '$GPDB_INSTALL_DIR/greenplum-db-7'"; then
-             log_warn_with_timestamp "Greenplum appears to be already installed in $GPDB_INSTALL_DIR on $host. Skipping installation."
-             continue
-        fi
-
-        # Determine the package manager based on the OS (assuming CentOS/RHEL here)
-        local remote_script="
-            set -e
-            echo \"--- Installing Greenplum on $host ---\"
-
-            if rpm -q --quiet rpm; then
-                echo \"Using rpm to install Greenplum...\"
-                sudo rpm -ivh $remote_installer_path
-            else
-                echo \"rpm not found. Cannot proceed with installation on $host.\"
-                exit 1
-            fi
-            echo \"--- Greenplum installation on $host complete ---
-        "
-        log_info_with_timestamp "Executing remote installation script on $host"
-        execute_command ssh -t "$host" "$remote_script" || log_error_with_timestamp "Greenplum installation failed on $host"
-
-        # Source the greenplum_path.sh file (needed for gpinitsystem later)
-        #  This will likely need adjusting based on the actual path within the installed Greenplum directory
-        #  It is also not persistent, so we will need to add it to the gpadmin user's .bashrc later
-        #  Consider also adding logic to handle different Greenplum versions as part of the path.
-        log_info_with_timestamp "Sourcing greenplum_path.sh on $host - this is a temporary setting."
-        execute_command ssh "$host" "source $GPDB_INSTALL_DIR/greenplum-db-7/greenplum_path.sh"
-    done
-    echo "" # New line after progress bar
-
-    log_success "Greenplum binaries installed on all hosts."
-}
-
-initialize_cluster() {
-    log_info "--- Step 4: Initializing Greenplum Cluster ---"
-
-    local coordinator_host="$GPDB_COORDINATOR_HOST"
-    local all_hosts=($(get_all_hosts))
-
-    # --- 1. Generate gpinitsystem_config ---
-    log_info "Generating gpinitsystem_config file..."
-
-    # Determine the segment prefix.  This assumes a simple sequential naming scheme (sdw1, sdw2, etc.)
-    #  If a non-sequential or custom naming scheme is used, this will need adjustment.
-    local segment_prefix
-    if [[ ${#GPDB_SEGMENT_HOSTS[@]} -gt 1 ]]; then
-        segment_prefix=$(echo "${GPDB_SEGMENT_HOSTS[0]}" | sed 's/[0-9]*$//') #remove trailing digits
-    else
-        segment_prefix="sdw" # Default prefix if only one segment host (or coordinator is the only host)
-    fi
-
-    local gpinitsystem_config="$GPDB_INSTALL_DIR/gpinitsystem_config"
-    cat > "$gpinitsystem_config" <<EOL
-ARRAY_NAME="TDI Greenplum Cluster"
-SEG_PREFIX=$segment_prefix
-PORT_BASE=40000
-MASTER_HOSTNAME=$GPDB_COORDINATOR_HOST
-MASTER_DIRECTORY=$GPDB_DATA_DIR/master
-MASTER_PORT=5432
-DATABASE_NAME=tdi
-
-EOL
-
-    # Add segment hosts and directories
-    local i=0
-    for host in "${GPDB_SEGMENT_HOSTS[@]}"; do
-        echo "declare -a DATA_DIRECTORY=('$GPDB_DATA_DIR/primary$i')" >> "$gpinitsystem_config"
-        if [[ "$host" == "$coordinator_host" && ${#GPDB_SEGMENT_HOSTS[@]} -gt 1 ]]; then
-            # Special case: if the coordinator is also a segment, but not the *only* segment,
-            #  we need to assign it a different port and hostname for the segment instance.
-            echo "declare -a MACHINE_LIST=('${segment_prefix}$i')" >> "$gpinitsystem_config"  # e.g. sdw0
-        else
-            echo "declare -a MACHINE_LIST=('$host')" >> "$gpinitsystem_config"
-        fi
-        ((i++))
-    done
-
-    if [ -n "$GPDB_STANDBY_HOST" ]; then
-        echo "STANDBY_MASTER_HOSTNAME=$GPDB_STANDBY_HOST" >> "$gpinitsystem_config"
-    fi
-
-    log_success "Generated gpinitsystem_config at $gpinitsystem_config"
-
-    # --- 2. Run gpinitsystem ---
-    log_info "Initializing Greenplum cluster with gpinitsystem..."
-    execute_command ssh "$coordinator_host" "sudo -u gpadmin $GPDB_INSTALL_DIR/greenplum-db-7/bin/gpinitsystem -c $gpinitsystem_config -a" || log_error "gpinitsystem failed."
-
-    # --- 3. Set up environment variables (persistent) ---
-    log_info_with_timestamp "Setting up persistent environment variables for gpadmin on all hosts..."
-    local env_setup="
-if [ -f $GPDB_INSTALL_DIR/greenplum-db-7/greenplum_path.sh ]; then
-    source $GPDB_INSTALL_DIR/greenplum-db-7/greenplum_path.sh
-fi
-export MASTER_HOST=$GPDB_COORDINATOR_HOST
-export PGPORT=5432
-export PGUSER=gpadmin
-export PGDATABASE=tdi
-"
-    local total_hosts=${#all_hosts[@]}
-    local current_host=0
-    
-    for host in "${all_hosts[@]}"; do
-        ((current_host++))
-        show_progress "Configuring environment" "$current_host" "$total_hosts"
-        log_info_with_timestamp "Configuring environment on $host..."
-        execute_command ssh "$host" "sudo -u gpadmin bash -c \"echo '$env_setup' >> /home/gpadmin/.bashrc\""
-        # Also source it for the current session (though this only affects this script's execution)
-        execute_command ssh "$host" "sudo -u gpadmin bash -c \"source /home/gpadmin/.bashrc\""
-    done
-    echo "" # New line after progress bar
-
-    # --- 4. Configure pg_hba.conf ---
-    log_info "Configuring pg_hba.conf on coordinator..."
-    local pg_hba_path="$GPDB_DATA_DIR/master/pg_hba.conf" # Adjust this if necessary for different GPDB versions
-
-    # Allow connections from all hosts in the cluster, using password authentication
-    local pg_hba_entries=""
-    for host in "${all_hosts[@]}"; do
-        pg_hba_entries="$pg_hba_entries
-host    all             all             $host/32                 password"
-    done
-
-    # Append the entries to pg_hba.conf
-    execute_command ssh "$coordinator_host" "sudo -u gpadmin bash -c \"echo '$pg_hba_entries' >> $pg_hba_path\"" || log_error "Failed to update pg_hba.conf"
-
-    # Restart Greenplum to apply pg_hba.conf changes
-    log_info "Restarting Greenplum to apply pg_hba.conf changes..."
-    execute_command ssh "$coordinator_host" "sudo -u gpadmin $GPDB_INSTALL_DIR/greenplum-db-7/bin/gpstop -ar"
-    execute_command ssh "$coordinator_host" "sudo -u gpadmin $GPDB_INSTALL_DIR/greenplum-db-7/bin/gpstart -a" || log_error "Failed to restart Greenplum"
-
-    log_success "Greenplum cluster initialized and configured."
-}
-
-# --- Main Execution ---
-main() {
-    echo -e "${COLOR_GREEN}Welcome to the Tanzu Greenplum Database Installer!${COLOR_RESET}"
-    log_info_with_timestamp "Starting Greenplum installation process"
-    
-    # Create the directory for installer files if it doesn't exist.
-    mkdir -p "$INSTALL_FILES_DIR"
-    log_info_with_timestamp "Please place required installation files in the '$INSTALL_FILES_DIR' directory."
-
-    # Parse command-line arguments
+# Function to parse command line arguments
+parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run)
@@ -661,95 +77,439 @@ main() {
                 log_warn "Dry run mode enabled. No commands will be executed."
                 shift
                 ;;
+            --config)
+                if [ -n "$2" ]; then
+                    CONFIG_FILE="$2"
+                    shift 2
+                else
+                    log_error "Option --config requires a filename"
+                fi
+                ;;
             --help)
                 show_help
                 exit 0
                 ;;
+            --version)
+                show_version
+                exit 0
+                ;;
+            --force|--reset)
+                RESET_STATE=true
+                shift
+                ;;
+            --clean)
+                CLEAN_MODE=true
+                shift
+                ;;
             *)
                 log_error "Unknown option: $1"
+                show_help
+                exit 1
                 ;;
         esac
     done
+}
 
-    configure_installation
+# Phase 1: Initialization
+phase_initialization() {
+    if [ -f "$STATE_DIR/.step_phase_initialization" ]; then
+        log_info "Initialization phase already completed, skipping."
+        return
+    fi
+    report_phase_start 1 "Initialization"
+    
+    increment_step
+    report_progress "Initialization" $CURRENT_STEP 3 "Setting up environment"
+    
+    # Setup signal handlers
+    setup_signal_handlers
+    
+    # Create install files directory
+    mkdir -p "$INSTALL_FILES_DIR"
+    log_info "Install files directory: $INSTALL_FILES_DIR"
+    
+    increment_step
+    report_progress "Initialization" $CURRENT_STEP 3 "Loading configuration"
+    
+    # Configure installation
+    configure_installation "$CONFIG_FILE"
+    
+    increment_step
+    report_progress "Initialization" $CURRENT_STEP 3 "Validating configuration"
+    
+    # Load and validate configuration
+    load_configuration "$CONFIG_FILE"
+    
+    report_phase_complete "Initialization"
+    touch "$STATE_DIR/.step_phase_initialization"
+}
 
-    # Load the configuration
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        log_info "Configuration loaded."
-        validate_configuration
+# Phase 2: Pre-flight Checks
+phase_preflight_checks() {
+    if [ -f "$STATE_DIR/.step_phase_preflight" ]; then
+        log_info "Pre-flight Checks phase already completed, skipping."
+        return
+    fi
+    report_phase_start 2 "Pre-flight Checks"
+    
+    local all_hosts=($(get_all_hosts))
+    
+    increment_step
+    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking privileges"
+    check_sudo_privileges
+    
+    increment_step
+    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking OS compatibility"
+    check_os_compatibility "${all_hosts[@]}"
+    
+    increment_step
+    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking dependencies"
+    check_dependencies "${all_hosts[@]}"
+    
+    increment_step
+    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking system resources"
+    check_system_resources
+    
+    increment_step
+    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking Greenplum compatibility"
+    check_greenplum_compatibility "$INSTALL_FILES_DIR"
+    
+    increment_step
+    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking network connectivity"
+    check_network_connectivity "${all_hosts[@]}"
+    
+    report_phase_complete "Pre-flight Checks"
+    touch "$STATE_DIR/.step_phase_preflight"
+}
+
+# Phase 3: Host Setup
+phase_host_setup() {
+    if [ -f "$STATE_DIR/.step_phase_host_setup" ]; then
+        log_info "Host Setup phase already completed, skipping."
+        return
+    fi
+    report_phase_start 3 "Host Setup"
+    
+    local all_hosts=($(get_all_hosts))
+    
+    increment_step
+    report_progress "Host Setup" $CURRENT_STEP 3 "Collecting credentials"
+    collect_credentials
+    
+    increment_step
+    report_progress "Host Setup" $CURRENT_STEP 3 "Setting up users and directories"
+    setup_users_and_directories "${all_hosts[@]}"
+    
+    increment_step
+    report_progress "Host Setup" $CURRENT_STEP 3 "Configuring SSH"
+    configure_ssh_access "${all_hosts[@]}"
+    
+    report_phase_complete "Host Setup"
+    touch "$STATE_DIR/.step_phase_host_setup"
+}
+
+# Phase 4: Greenplum Installation
+phase_greenplum_installation() {
+    if [ -f "$STATE_DIR/.step_phase_greenplum_installation" ]; then
+        log_info "Greenplum Installation phase already completed, skipping."
+        return
+    fi
+    report_phase_start 4 "Greenplum Installation"
+    
+    local all_hosts=($(get_all_hosts))
+    
+    increment_step
+    report_progress "Greenplum Installation" $CURRENT_STEP 4 "Finding installer"
+    local installer_file=$(find_greenplum_installer "$INSTALL_FILES_DIR")
+    
+    # Detect version and setup GPHOME
+    local gp_version=$(detect_greenplum_version "$installer_file")
+    setup_gphome "$gp_version"
+    
+    increment_step
+    report_progress "Greenplum Installation" $CURRENT_STEP 4 "Distributing installer"
+    distribute_installer "$installer_file" "${all_hosts[@]}"
+    
+    increment_step
+    report_progress "Greenplum Installation" $CURRENT_STEP 4 "Installing binaries"
+    install_greenplum_binaries "${all_hosts[@]}" "$installer_file"
+    
+    increment_step
+    report_progress "Greenplum Installation" $CURRENT_STEP 4 "Initializing cluster"
+    initialize_cluster
+    
+    report_phase_complete "Greenplum Installation"
+    touch "$STATE_DIR/.step_phase_greenplum_installation"
+}
+
+# Phase 5: Completion
+phase_completion() {
+    if [ -f "$STATE_DIR/.step_phase_completion" ]; then
+        log_info "Completion phase already completed, skipping."
+        return
+    fi
+    report_phase_start 5 "Completion"
+    
+    increment_step
+    report_progress "Completion" $CURRENT_STEP 1 "Final verification"
+    
+    # Test cluster connectivity
+    if test_greenplum_connectivity "$GPDB_COORDINATOR_HOST"; then
+        log_success_with_timestamp "Greenplum installation completed successfully!"
+        log_info "Connect to your database with: sudo -u gpadmin psql -d tdi"
+        log_info "Check cluster status with: sudo -u gpadmin gpstate -s"
     else
-        log_error "Configuration file '$CONFIG_FILE' not found. Exiting."
+        log_warn "Installation completed but connectivity test failed"
+        log_info "Please check the troubleshooting guide for assistance"
     fi
     
-    # Execute installation steps
-    preflight_checks
-    setup_hosts
-    install_greenplum
-    initialize_cluster
-
-    log_success_with_timestamp "All done! Your Greenplum Database cluster is ready."
+    report_phase_complete "Completion"
+    touch "$STATE_DIR/.step_phase_completion"
 }
 
-# --- Help Function ---
-show_help() {
-    echo "Usage: $0 [OPTION]"
-    echo "Options:"
-    echo "  --dry-run     Enable dry-run mode (simulates installation without making changes)."
-    echo "  --help        Show this help message."
-}
-
-# --- Progress indicator functions ---
-show_progress() {
-    local message="$1"
-    local current="$2"
-    local total="$3"
-    local percentage=$((current * 100 / total))
+# Function to collect user credentials
+collect_credentials() {
+    log_info "Collecting user credentials..."
     
-    printf "\r${COLOR_BLUE}[INFO]${COLOR_RESET} %s: [%-50s] %d%% (%d/%d)" \
-        "$message" \
-        "$(printf '#%.0s' $(seq 1 $((percentage / 2))))" \
-        "$percentage" \
-        "$current" \
-        "$total"
+    # Get sudo password
+    read -s -p "Enter sudo password for all hosts: " SUDO_PASSWORD
+    echo ""
+    if [ -z "$SUDO_PASSWORD" ]; then
+        log_error "Sudo password cannot be empty"
+    fi
+    
+    # Get gpadmin password
+    read -s -p "Enter password for gpadmin user: " GPADMIN_PASSWORD
+    echo ""
+    if [ -z "$GPADMIN_PASSWORD" ]; then
+        log_error "Gpadmin password cannot be empty"
+    fi
+    
+    # Validate password strength
+    validate_password "$GPADMIN_PASSWORD" "gpadmin"
+    
+    log_success "Credentials collected"
 }
 
-show_spinner() {
-    local message="$1"
-    local pid=$2
-    local delay=0.1
-    local spinstr='|/-\'
+# Function to setup users and directories
+setup_users_and_directories() {
+    local hosts=("$@")
     
-    while kill -0 $pid 2>/dev/null; do
-        local temp=${spinstr#?}
-        printf "\r${COLOR_BLUE}[INFO]${COLOR_RESET} %s [%c] " "$message" "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
+    log_info "Setting up users and directories..."
+    
+    for host in "${hosts[@]}"; do
+        log_info "Setting up host: $host"
+        create_gpadmin_user "$host"
+        if [ "$host" = "$GPDB_COORDINATOR_HOST" ]; then
+            create_and_chown_dir "$host" "$COORDINATOR_DATA_DIR"
+        else
+            create_and_chown_dir "$host" "$SEGMENT_DATA_DIR"
+        fi
     done
-    printf "\r${COLOR_BLUE}[INFO]${COLOR_RESET} %s [Done]    \n" "$message"
+    
+    log_success "Users and directories setup completed"
 }
 
-# --- Enhanced logging with timestamps ---
-log_info_with_timestamp() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${COLOR_BLUE}[INFO][${timestamp}]${COLOR_RESET} $1"
+# Function to create gpadmin user on a host
+create_gpadmin_user() {
+    local host="$1"
+    
+    log_info "Creating gpadmin user on $host..."
+    
+    local remote_script="
+        set -e
+        if ! getent group gpadmin > /dev/null; then
+            groupadd gpadmin
+        fi
+        
+        if ! id -u gpadmin > /dev/null 2>&1; then
+            useradd -g gpadmin -m -d /home/gpadmin gpadmin
+        fi
+        
+        echo \"gpadmin:$GPADMIN_PASSWORD\" | chpasswd
+        
+        # Create directories
+        mkdir -p \"/usr/local\" \"$GPDB_DATA_DIR\"
+        chown -R gpadmin:gpadmin \"/usr/local\" \"$GPDB_DATA_DIR\"
+        chmod 755 \"/usr/local\" \"$GPDB_DATA_DIR\"
+    "
+    
+    execute_command "ssh_execute '$host' \"echo '$SUDO_PASSWORD' | sudo -S bash -c '$remote_script'\""
 }
 
-log_success_with_timestamp() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${COLOR_GREEN}[SUCCESS][${timestamp}]${COLOR_RESET} $1"
+# Function to create data directories on a single host
+create_data_directories_single() {
+    local host="$1"
+    
+    log_info "Creating data directories on $host..."
+    
+    # Create master directory
+    execute_command "ssh_execute '$host' 'sudo -u gpadmin mkdir -p $GPDB_DATA_DIR/master'"
+    execute_command "ssh_execute '$host' 'sudo -u gpadmin chmod 755 $GPDB_DATA_DIR/master'"
+    
+    # Create segment directories
+    local i=0
+    for segment_host in "${GPDB_SEGMENT_HOSTS[@]}"; do
+        if [ "$segment_host" = "$host" ]; then
+            execute_command "ssh_execute '$host' 'sudo -u gpadmin mkdir -p $GPDB_DATA_DIR/primary$i'"
+            execute_command "ssh_execute '$host' 'sudo -u gpadmin chmod 755 $GPDB_DATA_DIR/primary$i'"
+        fi
+        i=$((i + 1))
+    done
+    # After all data directories are created (in create_data_directories_single), recursively chown the parent of the data directory as well
+    execute_command "ssh_execute '$host' 'sudo chown -R gpadmin:gpadmin $(dirname $GPDB_DATA_DIR)'"
 }
 
-log_warn_with_timestamp() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${COLOR_YELLOW}[WARN][${timestamp}]${COLOR_RESET} $1"
+# Function to configure SSH access
+configure_ssh_access() {
+    local hosts=("$@")
+    
+    log_info "Configuring SSH access..."
+    
+    if is_single_node_installation; then
+        setup_single_node_ssh "gpadmin"
+    else
+        setup_multi_node_ssh "gpadmin" "$GPADMIN_PASSWORD" "${hosts[@]}"
+    fi
+    
+    # Test SSH connectivity
+    for host in "${hosts[@]}"; do
+        if test_ssh_connectivity "gpadmin" "$host"; then
+            log_success "SSH connectivity to $host verified"
+        else
+            log_error "SSH connectivity to $host failed"
+        fi
+    done
+    
+    log_success "SSH access configured"
 }
 
-log_error_with_timestamp() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${COLOR_RED}[ERROR][${timestamp}]${COLOR_RESET} $1" >&2
-    exit 1
+# Function to install Greenplum binaries on all hosts
+install_greenplum_binaries() {
+    local hosts=("$@")
+    local installer_file="${hosts[-1]}"  # Last argument is the installer file
+    unset hosts[-1]  # Remove installer file from hosts array
+    
+    log_info "Installing Greenplum binaries..."
+    
+    for host in "${hosts[@]}"; do
+        install_greenplum_single "$host" "$installer_file" "$SUDO_PASSWORD"
+    done
+    
+    log_success "Greenplum binaries installed on all hosts"
 }
 
-# Run the main function
+# Function to initialize the cluster
+initialize_cluster() {
+    local all_hosts=($(get_all_hosts))
+    
+    log_info "Initializing Greenplum cluster..."
+    
+    # Generate configuration
+    local config_file=$(generate_gpinitsystem_config "$GPDB_COORDINATOR_HOST" "${GPDB_SEGMENT_HOSTS[@]}")
+    local machine_list_file="/tmp/machine_list"
+    
+    # Create data directories
+    create_data_directories "${all_hosts[@]}"
+    
+    # Initialize cluster
+    initialize_greenplum_cluster "$GPDB_COORDINATOR_HOST" "$config_file" "$machine_list_file"
+    
+    # Setup environment
+    setup_gpadmin_environment "${all_hosts[@]}"
+    
+    # Configure pg_hba.conf
+    configure_pg_hba "$GPDB_COORDINATOR_HOST" "${all_hosts[@]}"
+    
+    # Restart cluster
+    restart_greenplum_cluster "$GPDB_COORDINATOR_HOST"
+    
+    log_success "Cluster initialization completed"
+}
+
+# Function to clean Greenplum and data directories
+clean_greenplum() {
+    local all_hosts=($(get_all_hosts))
+    log_warn "CLEAN MODE: This will remove Greenplum and all data directories from all hosts!"
+    for host in "${all_hosts[@]}"; do
+        log_info "[CLEAN] Removing data directory $GPDB_DATA_DIR on $host..."
+        execute_command "ssh_execute '$host' 'sudo rm -rf $GPDB_DATA_DIR'"
+        log_info "[CLEAN] Attempting to remove parent directory $(dirname $GPDB_DATA_DIR) on $host (if empty)..."
+        execute_command "ssh_execute '$host' 'sudo rmdir $(dirname $GPDB_DATA_DIR) 2>/dev/null || true'"
+        log_info "[CLEAN] Uninstalling Greenplum on $host..."
+        execute_command "ssh_execute '$host' 'sudo yum remove -y greenplum-db-7'"
+    done
+    log_success "Greenplum and all data directories removed from all hosts."
+}
+
+# Function to create and chown a directory
+create_and_chown_dir() {
+    local host="$1"
+    local dir="$2"
+    execute_command "ssh_execute '$host' 'sudo mkdir -p $dir && sudo chown -R gpadmin:gpadmin $dir'"
+}
+
+# Function to generate gpinitsystem_config
+generate_gpinitsystem_config() {
+    local coordinator_host="$1"
+    shift
+    local segment_hosts=("$@")
+    local config_file="/tmp/gpinitsystem_config"
+    echo "ARRAY_NAME=\"TDI Greenplum Cluster\"" > "$config_file"
+    echo "SEG_PREFIX=gpseg" >> "$config_file"
+    echo "PORT_BASE=40000" >> "$config_file"
+    echo "COORDINATOR_HOSTNAME=$coordinator_host" >> "$config_file"
+    echo "COORDINATOR_DIRECTORY=$COORDINATOR_DATA_DIR" >> "$config_file"
+    echo "COORDINATOR_PORT=5432" >> "$config_file"
+    echo "DATABASE_NAME=tdi" >> "$config_file"
+    echo "ENCODING=UNICODE" >> "$config_file"
+    echo "LOCALE=en_US.utf8" >> "$config_file"
+    echo "CHECK_POINT_SEGMENTS=8" >> "$config_file"
+    # DATA_DIRECTORY array for segments
+    echo -n "declare -a DATA_DIRECTORY=(" >> "$config_file"
+    for host in "${segment_hosts[@]}"; do
+        echo -n "$SEGMENT_DATA_DIR " >> "$config_file"
+    done
+    echo ")" >> "$config_file"
+    echo "$config_file"
+}
+
+# Function to initialize the cluster
+initialize_greenplum_cluster() {
+    local coordinator_host="$1"
+    local config_file="$2"
+    local machine_list_file="$3"
+    execute_command ssh "$coordinator_host" "source /usr/local/greenplum-db/greenplum_path.sh && export COORDINATOR_DATA_DIRECTORY=$COORDINATOR_DATA_DIR && gpinitsystem -c $config_file -h $machine_list_file"
+}
+
+# Main execution function
+main() {
+    echo -e "${COLOR_GREEN}Tanzu Greenplum Database Installer v2.0${COLOR_RESET}"
+    log_info_with_timestamp "Starting installation process"
+    
+    # Parse command line arguments
+    parse_arguments "$@"
+    
+    STATE_DIR="/tmp/gpdb_installer_state"
+    mkdir -p "$STATE_DIR"
+    if [ "$CLEAN_MODE" = true ]; then
+        clean_greenplum
+        exit 0
+    fi
+    if [ "$RESET_STATE" = true ]; then
+        echo "[INFO] Clearing all step markers in $STATE_DIR..."
+        rm -f $STATE_DIR/.step_*
+    fi
+    
+    # Execute installation phases
+    phase_initialization
+    phase_preflight_checks
+    phase_host_setup
+    phase_greenplum_installation
+    phase_completion
+    
+    log_success_with_timestamp "Installation completed successfully!"
+}
+
+# Execute main function with all arguments
 main "$@"

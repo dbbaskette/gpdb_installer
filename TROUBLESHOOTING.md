@@ -41,6 +41,26 @@ sudo apt-get install sshpass
 ### 4. SSH Connection Failed
 **Error**: "Failed to copy SSH key to host"
 **Solutions**:
+
+**For Single-Node Installations:**
+```bash
+# Check if SSH key exists
+ls -la /home/gpadmin/.ssh/
+
+# Generate SSH key manually
+sudo -u gpadmin ssh-keygen -t rsa -N "" -f /home/gpadmin/.ssh/id_rsa
+
+# Set up localhost access
+sudo -u gpadmin ssh-keyscan -H localhost >> /home/gpadmin/.ssh/known_hosts
+sudo -u gpadmin cat /home/gpadmin/.ssh/id_rsa.pub >> /home/gpadmin/.ssh/authorized_keys
+sudo -u gpadmin chmod 600 /home/gpadmin/.ssh/authorized_keys
+sudo -u gpadmin chmod 700 /home/gpadmin/.ssh
+
+# Test localhost SSH
+sudo -u gpadmin ssh localhost "echo 'SSH working'"
+```
+
+**For Multi-Node Installations:**
 ```bash
 # Verify SSH connectivity
 ssh user@hostname
@@ -65,6 +85,12 @@ ls -la files/
 
 # Verify installer compatibility
 file files/greenplum-db-*.rpm
+
+# Check for dependency issues
+sudo rpm -qpR files/greenplum-db-*.rpm
+
+# Install dependencies manually
+sudo dnf install -y apr apr-util krb5-devel libevent-devel perl python3-psycopg2 python3.11 readline-devel
 
 # Manual installation test
 sudo rpm -ivh files/greenplum-db-*.rpm
