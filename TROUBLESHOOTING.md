@@ -183,6 +183,25 @@ sed -i 's/GPDB_SEGMENT_HOSTS=.*/GPDB_SEGMENT_HOSTS=('$(hostname -s)')/' gpdb_con
 ./gpdb_installer.sh
 ```
 
+### 17. pg_hba.conf Changes Not Taking Effect
+**Symptom**: New or updated authentication rules in pg_hba.conf are not recognized.
+**Solution**:
+```bash
+# Reload configuration (no restart required)
+sudo -u gpadmin gpstop -u
+# Or, as superuser in psql:
+psql -d tdi -c 'SELECT pg_reload_conf();'
+```
+- A full cluster restart is **not** required for pg_hba.conf changes. Only restart if you continue to have issues after a reload.
+
+## Troubleshooting Greenplum Environment
+
+- The installer configures the gpadmin user's `~/.bashrc` to source the Greenplum environment (`greenplum_path.sh`) and set required variables.
+- If you see errors like `gpstate: command not found` or missing environment variables, ensure you are running commands as gpadmin with `source ~/.bashrc` in your session:
+  ```bash
+  sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'
+  ```
+
 ## Network Issues
 
 ### 11. Host Communication Problems
@@ -315,3 +334,10 @@ set +x
 | "Host key verification failed" | SSH key issues | Re-run SSH setup or manually copy keys |
 | "Port already in use" | Conflicting service | Stop PostgreSQL or change port |
 | "Disk space full" | Insufficient storage | Free up space or use different directory | 
+
+### Remote Deployment Confusion
+
+**Symptom:** Tried to push the installer to every cluster node.
+
+**Solution:**
+You only need to use `push_to_server.sh` to copy the installer to a single server (the coordinator or primary node). The installer will handle distributing files and configuration to all other nodes during the installation process. 

@@ -106,22 +106,27 @@ The installer will prompt you for the following information:
 ./gpdb_installer.sh --dry-run
 ```
 
-### Remote Deployment
+## Remote Deployment
 
-Deploy the installer to remote servers:
+You can deploy the installer package to a single remote server (typically the coordinator or primary node) using `push_to_server.sh`. Once deployed, SSH into that server and run the installer, which will handle installation and configuration across all cluster nodes.
 
+**Example: Deploy to a single server**
 ```bash
-# Deploy to a single server
-./push_to_server.sh user@server1.example.com
+./push_to_server.sh user@coordinator.example.com
+```
 
-# Deploy to multiple servers
-./push_to_server.sh user@server1 user@server2 user@server3
+**Example: Deploy with custom SSH key and target directory**
+```bash
+./push_to_server.sh --key-file ~/.ssh/id_rsa --target-dir /opt/gpdb_installer user@coordinator.example.com
+```
 
-# Deploy with custom SSH key and target directory
-./push_to_server.sh --key-file ~/.ssh/id_rsa --target-dir /opt/gpdb_installer user@server1
+> **Note:** You only need to push the installer to one server. The installer will distribute binaries and configuration to all cluster nodes from there.
 
-# Test deployment without actually doing it
-./push_to_server.sh --dry-run user@server1
+**To install:**
+```bash
+ssh user@coordinator.example.com
+cd /opt/gpdb_installer
+./gpdb_installer.sh
 ```
 
 ### Package Creation and GitHub Release
@@ -183,18 +188,20 @@ After successful installation:
 
 1. **Connect to the database**:
    ```bash
-   sudo -u gpadmin psql -d tdi
+   sudo -u gpadmin bash -c 'source ~/.bashrc && psql -d tdi'
    ```
 
 2. **Verify cluster status**:
    ```bash
-   sudo -u gpadmin gpstate -s
+   sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'
    ```
 
 3. **Check segment status**:
    ```bash
-   sudo -u gpadmin gpstate -e
+   sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -e'
    ```
+
+> **Note:** The installer configures the gpadmin user's `~/.bashrc` to source the Greenplum environment (`greenplum_path.sh`) and set required variables. Always use `source ~/.bashrc` in your session or scripts before running Greenplum commands as gpadmin.
 
 ## Troubleshooting
 

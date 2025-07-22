@@ -1,0 +1,39 @@
+# Greenplum Database Installation Configuration Template
+# Copy this file to gpdb_config.conf and customize with your actual values
+# Generated on: $(date)
+
+# Primary coordinator host (usually the first node)
+GPDB_COORDINATOR_HOST="coordinator-host.example.com"
+
+# Optional standby coordinator host (leave empty if not using standby)
+GPDB_STANDBY_HOST=""
+
+# All segment hosts (space-separated list in parentheses)
+# For single-node: same as coordinator host
+# For multi-node: list all segment hosts
+GPDB_SEGMENT_HOSTS=(segment-host-1.example.com segment-host-2.example.com segment-host-3.example.com)
+
+# Greenplum installation directory (where binaries will be installed)
+GPDB_INSTALL_DIR="/usr/local/greenplum-db"
+
+# Data root directory (parent directory for all data directories)
+# Subdirectories will be created: coordinator/, primary/, mirror/
+GPDB_DATA_ROOT="/home/gpdata"
+
+# Security credentials (will be encrypted/secured)
+GPADMIN_PASSWORD="your-secure-gpadmin-password-here"
+
+# Example configurations:
+#
+# Single Node Setup:
+# GPDB_COORDINATOR_HOST="myserver.local"
+# GPDB_SEGMENT_HOSTS=(myserver.local)
+#
+# Three Node Setup:
+# GPDB_COORDINATOR_HOST="gpdb-master.local" 
+# GPDB_SEGMENT_HOSTS=(gpdb-node1.local gpdb-node2.local gpdb-node3.local)
+#
+# With Standby:
+# GPDB_COORDINATOR_HOST="gpdb-master.local"
+# GPDB_STANDBY_HOST="gpdb-standby.local"
+# GPDB_SEGMENT_HOSTS=(gpdb-node1.local gpdb-node2.local)
