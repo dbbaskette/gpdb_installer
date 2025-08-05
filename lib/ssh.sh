@@ -8,21 +8,276 @@ source "$(dirname "${BASH_SOURCE[0]}")/validation.sh"
 
 # SSH connection reuse settings
 SSH_CONTROL_PATH="/tmp/ssh_mux_%h_%p_%r"
-SSH_CONTROL_PERSIST="5m"
+SSH_CONTROL_PERSIST="10m"
+SSH_TIMEOUT=30
 
-# Function to setup SSH connection multiplexing
-setup_ssh_multiplexing() {
+# Global array to track established SSH connections
+declare -a ESTABLISHED_SSH_HOSTS=()
+
+# Function to build SSH command with multiplexing options
+build_ssh_cmd() {
+    local ssh_cmd="ssh"
+    ssh_cmd="$ssh_cmd -o StrictHostKeyChecking=no"
+    ssh_cmd="$ssh_cmd -o UserKnownHostsFile=/dev/null"
+    ssh_cmd="$ssh_cmd -o ConnectTimeout=$SSH_TIMEOUT"
+    ssh_cmd="$ssh_cmd -o ServerAliveInterval=60"
+    ssh_cmd="$ssh_cmd -o ServerAliveCountMax=3"
+    ssh_cmd="$ssh_cmd -o ControlMaster=auto"
+    ssh_cmd="$ssh_cmd -o ControlPath=$SSH_CONTROL_PATH"
+    ssh_cmd="$ssh_cmd -o ControlPersist=$SSH_CONTROL_PERSIST"
+    echo "$ssh_cmd"
+}
+
+# Function to establish SSH master connection
+establish_ssh_connection() {
     local host="$1"
-    ssh -o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist="$SSH_CONTROL_PERSIST" -o ConnectTimeout=5 "$host" "echo 'SSH multiplexing setup'" >/dev/null 2>&1
+    
+    log_info "Establishing SSH master connection to $host..."
+    
+    # Clean up any existing socket for this host first
+    local socket_path=$(echo "$SSH_CONTROL_PATH" | sed "s/%h/$host/g" | sed "s/%p/22/g" | sed "s/%r/${USER:-$LOGNAME}/g")
+    
+    # Check if connection already exists and is working
+    if [ -S "$socket_path" ]; then
+        log_info "Existing SSH control socket found for $host, testing connection..."
+        if ssh -o ControlPath="$SSH_CONTROL_PATH" -O check "$host" 2>/dev/null; then
+            log_success "Existing SSH master connection to $host is working"
+            # Make sure it's in our tracking array
+            if ! [[ " ${ESTABLISHED_SSH_HOSTS[*]} " =~ " $host " ]]; then
+                ESTABLISHED_SSH_HOSTS+=("$host")
+            fi
+            return 0
+        else
+            log_info "Existing connection not working, cleaning up..."
+            # Try to cleanly close existing connection
+            ssh -o ControlPath="$SSH_CONTROL_PATH" -O exit "$host" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    rm -f "$socket_path" 2>/dev/null || true
+    
+    # Build SSH command for master connection (without auto mode)
+    local master_ssh_cmd="ssh"
+    master_ssh_cmd="$master_ssh_cmd -o StrictHostKeyChecking=no"
+    master_ssh_cmd="$master_ssh_cmd -o UserKnownHostsFile=/dev/null"
+    master_ssh_cmd="$master_ssh_cmd -o ConnectTimeout=30"
+    master_ssh_cmd="$master_ssh_cmd -o ServerAliveInterval=60"
+    master_ssh_cmd="$master_ssh_cmd -o ServerAliveCountMax=3"
+    master_ssh_cmd="$master_ssh_cmd -o ControlMaster=yes"
+    master_ssh_cmd="$master_ssh_cmd -o ControlPath=$SSH_CONTROL_PATH"
+    master_ssh_cmd="$master_ssh_cmd -o ControlPersist=$SSH_CONTROL_PERSIST"
+    
+    # Create persistent SSH connection 
+    if [ -n "$SSH_PASSWORD" ]; then
+        log_info "Creating master SSH connection using stored password..."
+        # Use sshpass if password is available
+        if command -v sshpass >/dev/null 2>&1; then
+            if sshpass -e $master_ssh_cmd -N -f "$host"; then
+                log_info "SSH master connection established using stored password"
+                # Brief pause to ensure connection is established
+                sleep 2
+                
+                # Verify the master connection is working
+                if ssh_execute "$host" "echo 'Connection test successful'" >/dev/null 2>&1; then
+                    log_success "SSH master connection verified and working for $host"
+                    ESTABLISHED_SSH_HOSTS+=("$host")
+                    return 0
+                else
+                    log_error "SSH master connection created but verification failed for $host"
+                    return 1
+                fi
+            else
+                log_warn "Failed to establish master connection to $host using stored password. Will prompt for password."
+            fi
+        else
+            log_warn "sshpass not available. Will prompt for password."
+        fi
+    fi
+    
+    # Fallback to manual password entry
+    log_info "Creating master SSH connection (will prompt for password)..."
+    if $master_ssh_cmd -N -f "$host"; then
+        log_info "SSH master connection established and ready for reuse"
+        # Brief pause to ensure connection is established
+        sleep 2
+        
+        # Verify the master connection is working (should use existing connection)
+        if ssh_execute "$host" "echo 'Connection test successful'" >/dev/null 2>&1; then
+            log_success "SSH master connection verified and working for $host"
+            ESTABLISHED_SSH_HOSTS+=("$host")
+            return 0
+        else
+            log_error "SSH master connection created but verification failed for $host"
+            return 1
+        fi
+    else
+        log_warn "Failed to establish master connection to $host. SSH will work but may prompt for passwords."
+        return 1
+    fi
+}
+
+# Function to establish connections to all hosts
+establish_ssh_connections() {
+    local hosts=("$@")
+    
+    log_info "Establishing SSH connections to all hosts to avoid repeated password prompts..."
+    
+    local success_count=0
+    local total_count=${#hosts[@]}
+    
+    for host in "${hosts[@]}"; do
+        if establish_ssh_connection "$host"; then
+            success_count=$((success_count + 1))
+        else
+            log_warn "SSH connection multiplexing not available for $host (will still work but may prompt for passwords)"
+        fi
+    done
+    
+    if [ $success_count -eq $total_count ]; then
+        log_success "All SSH master connections established successfully"
+    elif [ $success_count -gt 0 ]; then
+        log_info "SSH master connections established for $success_count out of $total_count hosts"
+        log_info "Remaining hosts will use standard SSH connections"
+    else
+        log_warn "No SSH master connections could be established. SSH will work but may prompt for passwords repeatedly."
+    fi
+    
+    return 0  # Don't fail the installation if SSH multiplexing doesn't work
+}
+
+# Function to check and re-establish SSH connections if needed
+ensure_ssh_connections() {
+    local hosts=("$@")
+    
+    log_info "Checking SSH master connections..."
+    
+    local failed_hosts=()
+    for host in "${hosts[@]}"; do
+        local socket_path=$(echo "$SSH_CONTROL_PATH" | sed "s/%h/$host/g" | sed "s/%p/22/g" | sed "s/%r/${USER:-$LOGNAME}/g")
+        
+        # Check if socket exists and connection is working
+        if [ -S "$socket_path" ]; then
+            if ssh_execute "$host" "echo 'Connection test successful'" >/dev/null 2>&1; then
+                continue  # Connection is working
+            fi
+        fi
+        
+        log_warn "SSH master connection lost for $host, attempting to re-establish..."
+        if establish_ssh_connection "$host"; then
+            log_success "SSH master connection re-established for $host"
+        else
+            failed_hosts+=("$host")
+        fi
+    done
+    
+    if [ ${#failed_hosts[@]} -gt 0 ]; then
+        log_warn "Could not re-establish SSH master connections for: ${failed_hosts[*]}"
+        log_info "These hosts will use standard SSH connections (may prompt for passwords)"
+    fi
+}
+
+# Function to cleanup SSH connections
+cleanup_ssh_connections() {
+    log_info "Cleaning up SSH connections..."
+    
+    for host in "${ESTABLISHED_SSH_HOSTS[@]}"; do
+        local ssh_cmd=$(build_ssh_cmd)
+        $ssh_cmd -O exit "$host" 2>/dev/null || true
+    done
+    
+    # Clean up any remaining socket files
+    rm -f /tmp/ssh_mux_* 2>/dev/null || true
+    
+    ESTABLISHED_SSH_HOSTS=()
+}
+
+# Function to clean up all SSH master connections and processes
+cleanup_all_ssh_connections() {
+    log_info "Cleaning up all SSH master connections and processes..."
+    
+    # Find and clean up any SSH control sockets
+    find /tmp -name "ssh_mux_*" -type s 2>/dev/null | while read socket; do
+        if [ -S "$socket" ]; then
+            log_info "Cleaning up SSH socket: $socket"
+            # Extract host info from socket name if possible
+            local host_info=$(basename "$socket" | sed 's/ssh_mux_//' | cut -d'_' -f1)
+            if [ -n "$host_info" ]; then
+                ssh -o ControlPath="$socket" -O exit "$host_info" 2>/dev/null || true
+            fi
+            rm -f "$socket" 2>/dev/null || true
+        fi
+    done
+    
+    # Kill any hanging SSH master processes (more targeted)
+    pkill -f "ssh.*ControlMaster.*yes" 2>/dev/null || true
+    pkill -f "ssh.*ControlPersist" 2>/dev/null || true
+    
+    # Also kill any SSH processes that might be stuck with our control path pattern
+    pgrep -f "ssh.*${SSH_CONTROL_PATH}" | xargs kill 2>/dev/null || true
+    
+    # Wait a moment for cleanup
+    sleep 3
+    
+    # Final cleanup of any remaining socket files
+    rm -f /tmp/ssh_mux_* 2>/dev/null || true
+    
+    ESTABLISHED_SSH_HOSTS=()
+    log_info "SSH connection cleanup completed"
+}
+
+# Function to cleanup SSH connections on remote hosts
+cleanup_remote_ssh_connections() {
+    local hosts=("$@")
+    
+    log_info "Cleaning up SSH connections on remote hosts..."
+    
+    for host in "${hosts[@]}"; do
+        log_info "Cleaning up SSH connections on $host..."
+        
+        # Use sshpass if password is available, otherwise skip remote cleanup
+        if [ -n "$SSH_PASSWORD" ] && command -v sshpass >/dev/null 2>&1; then
+            sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$host" "
+                # Kill any SSH processes that might be stuck
+                pkill -f 'ssh.*ControlMaster' 2>/dev/null || true
+                pkill -f 'sshd.*notty' 2>/dev/null || true
+                # Clean up any socket files
+                rm -f /tmp/ssh_mux_* 2>/dev/null || true
+            " 2>/dev/null || true
+        else
+            log_info "Skipping remote cleanup for $host (no stored password available)"
+        fi
+    done
 }
 
 # Function to execute command on remote host with connection reuse
 ssh_execute() {
     local host="$1"
     local command="$2"
-    local timeout="${3:-30}"
+    local timeout="${3:-$SSH_TIMEOUT}"
+    local silent="${4:-false}"
     
-    ssh -o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist="$SSH_CONTROL_PERSIST" -o ConnectTimeout="$timeout" "$host" "$command"
+    local ssh_cmd=$(build_ssh_cmd)
+    # Override timeout if specified
+    if [ "$timeout" != "$SSH_TIMEOUT" ]; then
+        ssh_cmd=$(echo "$ssh_cmd" | sed "s/ConnectTimeout=$SSH_TIMEOUT/ConnectTimeout=$timeout/")
+    fi
+    
+    # Add some debug info (only if not in silent mode)
+    if [ "$silent" != "true" ] && [[ "$command" != *"echo 'Connection test successful'"* ]]; then
+        local socket_path=$(echo "$SSH_CONTROL_PATH" | sed "s/%h/$host/g" | sed "s/%p/22/g" | sed "s/%r/${USER:-$LOGNAME}/g")
+        if [ -S "$socket_path" ]; then
+            # Double-check that the connection is actually working
+            if ssh -o ControlPath="$SSH_CONTROL_PATH" -O check "$host" 2>/dev/null; then
+                log_info "Using SSH master connection for $host"
+            else
+                log_warn "SSH master connection socket exists but not working for $host - may prompt for password"
+            fi
+        else
+            log_warn "SSH master connection not available for $host - may prompt for password"
+        fi
+    fi
+    
+    $ssh_cmd "$host" "$command"
 }
 
 # Function to copy file to remote host with connection reuse
@@ -31,7 +286,16 @@ ssh_copy_file() {
     local host="$2"
     local dest_path="$3"
     
-    scp -o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist="$SSH_CONTROL_PERSIST" "$source_file" "$host:$dest_path"
+    # Build SCP command with same options as SSH
+    local scp_cmd="scp"
+    scp_cmd="$scp_cmd -o StrictHostKeyChecking=no"
+    scp_cmd="$scp_cmd -o UserKnownHostsFile=/dev/null"
+    scp_cmd="$scp_cmd -o ConnectTimeout=$SSH_TIMEOUT"
+    scp_cmd="$scp_cmd -o ControlMaster=auto"
+    scp_cmd="$scp_cmd -o ControlPath=$SSH_CONTROL_PATH"
+    scp_cmd="$scp_cmd -o ControlPersist=$SSH_CONTROL_PERSIST"
+    
+    $scp_cmd "$source_file" "$host:$dest_path"
 }
 
 # Function to generate SSH key for user

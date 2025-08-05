@@ -21,8 +21,8 @@ validate_configuration() {
         log_error "Install directory is not set in configuration."
     fi
     
-    if [ -z "$GPDB_DATA_DIR" ]; then
-        log_error "Data directory is not set in configuration."
+    if [ -z "$GPDB_DATA_ROOT" ]; then
+        log_error "Data root directory is not set in configuration."
     fi
     
     log_success "Configuration validation passed."
@@ -138,7 +138,7 @@ validate_system_requirements() {
     fi
     
     # Disk space check
-    local check_dir="${GPDB_DATA_DIR:-.}"
+    local check_dir="${GPDB_DATA_ROOT:-.}"
     local free_space_kb=$(df -k "$check_dir" 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
     local free_space=$((free_space_kb / 1024 / 1024))
     

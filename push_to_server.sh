@@ -46,6 +46,7 @@ FORCE=false
 BACKUP_EXISTING=true
 VERIFY_DEPLOYMENT=true
 INTERACTIVE_SSH=true
+SKIP_RPMS=false
 SSH_KEY_FILE=""
 SSH_PORT="22"
 TARGET_DIR="$DEFAULT_TARGET_DIR"
@@ -111,6 +112,7 @@ OPTIONS:
     --include PATTERN       Include only files matching pattern
     --minimal               Deploy minimal package (core files only)
     --full                  Deploy full package (includes tests, docs)
+    --no-rpms               Skip RPMs, backup, and enable force (fastest for testing)
 
   Advanced Options:
     --config-file FILE      Use custom configuration file
@@ -140,6 +142,9 @@ EXAMPLES:
   Force deployment with backup:
     $0 --force --backup --target-dir /opt/gpdb user@server1
 
+  Fast deployment without RPMs (testing):
+    $0 --no-rpms user@server1
+
 REQUIREMENTS:
   - SSH access to target servers
   - Target servers must have bash shell
@@ -147,12 +152,12 @@ REQUIREMENTS:
   - tar and gzip utilities on target servers
 
 DEPLOYMENT INCLUDES:
-  - Core installer script (gpdb_installer.sh)
+  - Core installer scripts (gpdb_installer.sh, datalake_installer.sh)
   - Library modules (lib/)
-  - Configuration files
+  - Configuration files (gpdb_config.conf, datalake_config.conf)
   - Documentation
   - Test suite (if not excluded)
-  - Installation files (files/)
+  - Installation files (files/) - unless --no-rpms is used
 
 EOF
 }
@@ -247,6 +252,13 @@ parse_args() {
                 ;;
             --full)
                 INCLUDE_PATTERNS=("*")
+                shift
+                ;;
+            --no-rpms)
+                SKIP_RPMS=true
+                # Automatically disable backup and enable force for faster testing when skipping RPMs
+                BACKUP_EXISTING=false
+                FORCE=true
                 shift
                 ;;
             --timeout)
@@ -534,6 +546,8 @@ create_deployment_package() {
     # Define what to include
     local core_files=(
         "gpdb_installer.sh"
+        "datalake_installer.sh"
+        "cleanup_greenplum.sh"
         "README.md"
         "TROUBLESHOOTING.md"
         "ARCHITECTURE.md"
@@ -545,15 +559,20 @@ create_deployment_package() {
         "TESTING_SUMMARY.md"
         "ENHANCEMENTS_PLAN.md"
         "gpdb_config.conf"
+        "datalake_config.conf"
         "test_config.conf"
     )
     
     local directories=(
         "lib"
         "tests"
-        "files"
         "docs"
     )
+    
+    # Add files directory only if --no-rpms flag is not set
+    if [ "$SKIP_RPMS" = false ]; then
+        directories+=("files")
+    fi
     
     # Copy core files
     log_info "Copying core files..." >&2
@@ -574,7 +593,11 @@ create_deployment_package() {
     done
     
     # Copy directories
-    log_info "Copying directories (lib, tests, files)..." >&2
+    if [ "$SKIP_RPMS" = true ]; then
+        log_info "Copying directories (lib, tests, docs) - skipping files/..." >&2
+    else
+        log_info "Copying directories (lib, tests, docs, files)..." >&2
+    fi
     for dir in "${directories[@]}"; do
         if [ -d "$dir" ]; then
             cp -r "$dir" "$package_dir/"
@@ -613,16 +636,36 @@ EOF
     # Create compressed package (tar the contents, not the directory)
     log_info "Compressing deployment package..." >&2
     local original_dir=$(pwd)
-    cd "$package_dir"
+    
+    # Create archive with proper directory structure without using --transform
+    # Change to parent directory and tar the directory by name to avoid nesting
+    local package_basename=$(basename "$package_dir")
+    cd "$(dirname "$package_dir")"
     
     # Detect OS and use appropriate tar options to avoid macOS xattrs
     if [[ "$(uname)" == "Darwin" ]]; then
-        /usr/bin/tar --disable-copyfile --exclude='._*' --exclude='.DS_Store' --exclude='*.quarantine' -czf "$temp_dir/$package_name" .
+        # Set environment variables to disable xattr and use portable tar
+        export COPYFILE_DISABLE=1
+        if ! /usr/bin/tar --disable-copyfile --no-xattrs --exclude='._*' --exclude='.DS_Store' --exclude='*.quarantine' -czf "$temp_dir/$package_name" "$package_basename" 2>/dev/null; then
+            log_error "Failed to create deployment package" >&2
+            cd "$original_dir"
+            return 1
+        fi
     else
-        tar --no-xattrs --exclude='._*' --exclude='.DS_Store' --exclude='*.quarantine' -czf "$temp_dir/$package_name" .
+        if ! tar --exclude='._*' --exclude='.DS_Store' --exclude='*.quarantine' -czf "$temp_dir/$package_name" "$package_basename"; then
+            log_error "Failed to create deployment package" >&2
+            cd "$original_dir"
+            return 1
+        fi
     fi
     
     cd "$original_dir"
+    
+    # Verify package was created
+    if [ ! -f "$temp_dir/$package_name" ]; then
+        log_error "Package file was not created: $temp_dir/$package_name" >&2
+        return 1
+    fi
     
     local package_size=$(du -h "$temp_dir/$package_name" | cut -f1)
     log_success "Deployment package created: $package_name (size: $package_size)" >&2
@@ -739,13 +782,56 @@ deploy_to_host() {
     local package_name=$(basename "$package_path")
     log_info "Extracting package on $host..."
     
+    # Extract package and handle directory structure
     if ! ssh_execute "$host" "cd '$expanded_target_dir' && tar -xzf '$package_name' && rm '$package_name'"; then
         log_error "Failed to extract package on $host"
         return 1
     fi
     
+    # Move contents from extracted gpdb_installer directory to target directory
+    local fix_structure_script="
+        if [ -d '$expanded_target_dir/gpdb_installer' ]; then
+            echo 'Updating files from extracted directory...'
+            cd '$expanded_target_dir/gpdb_installer'
+            
+            # First, update all files
+            find . -maxdepth 1 -type f -exec cp {} '$expanded_target_dir/' \;
+            
+            # Then, update directories by copying their contents
+            for item in */; do
+                if [ -d \"\$item\" ]; then
+                    item=\${item%/}  # Remove trailing slash
+                    echo \"Updating directory: \$item\"
+                    if [ -d '$expanded_target_dir/\$item' ]; then
+                        echo \"Directory '$expanded_target_dir/\$item' exists, updating contents...\"
+                        # Remove old contents and copy new ones
+                        rm -rf '$expanded_target_dir/\$item'/*
+                        cp -rf \"\$item\"/* '$expanded_target_dir/\$item/' 2>/dev/null || true
+                        # Also copy hidden files
+                        cp -rf \"\$item\"/.[^.]* '$expanded_target_dir/\$item/' 2>/dev/null || true
+                        echo \"Contents of directory \$item updated successfully\"
+                    else
+                        echo \"Creating new directory: \$item\"
+                        cp -rf \"\$item\" '$expanded_target_dir/'
+                        echo \"Directory \$item created successfully\"
+                    fi
+                fi
+            done
+            
+            cd '$expanded_target_dir'
+            # Remove the extracted directory
+            rm -rf '$expanded_target_dir/gpdb_installer'
+            echo 'Directory structure updated successfully'
+        fi
+    "
+    
+    if ! ssh_execute "$host" "$fix_structure_script"; then
+        log_error "Failed to fix directory structure on $host"
+        return 1
+    fi
+    
     # Set proper permissions
-    if ! ssh_execute "$host" "find '$expanded_target_dir/gpdb_installer' -name '*.sh' -type f -exec chmod +x {} \;"; then
+    if ! ssh_execute "$host" "find '$expanded_target_dir' -name '*.sh' -type f -exec chmod +x {} \;"; then
         log_error "Failed to set permissions on $host"
         return 1
     fi
@@ -781,19 +867,19 @@ verify_deployment() {
     fi
     
     # Check if main installer exists and is executable
-    log_info "Checking installer at: $expanded_target_dir/gpdb_installer/gpdb_installer.sh"
-    if ssh_execute "$host" "[ -x '$expanded_target_dir/gpdb_installer/gpdb_installer.sh' ]" true; then
+    log_info "Checking installer at: $expanded_target_dir/gpdb_installer.sh"
+    if ssh_execute "$host" "[ -x '$expanded_target_dir/gpdb_installer.sh' ]" true; then
         log_success "Main installer found and executable on $host"
     else
         # Debug: list the directory contents
         log_info "Listing directory contents for debugging..."
-        ssh_execute "$host" "ls -la '$expanded_target_dir/gpdb_installer/'" true || true
+        ssh_execute "$host" "ls -la '$expanded_target_dir/'" true || true
         log_error "Main installer not found or not executable on $host"
         return 1
     fi
     
     # Check if library directory exists
-    if ssh_execute "$host" "[ -d '$expanded_target_dir/gpdb_installer/lib' ]" true; then
+    if ssh_execute "$host" "[ -d '$expanded_target_dir/lib' ]" true; then
         log_success "Library directory found on $host"
     else
         log_error "Library directory not found on $host"
@@ -936,12 +1022,14 @@ generate_deployment_report() {
     echo "-----------"
     for host in "${HOSTS[@]}"; do
         local expanded_target_dir=$(expand_target_dir "$host")
-        echo "2. Navigate to installer: cd $expanded_target_dir/gpdb_installer"
+        echo "  SSH to host: ssh $host"
+        echo "  Navigate to installer: cd $expanded_target_dir"
     done
-    echo "3. Run installer: ./gpdb_installer.sh"
-    echo "4. Or run dry test: ./gpdb_installer.sh --dry-run"
+    echo "3. Run GPDB installer: ./gpdb_installer.sh"
+    echo "4. Run TDL Controller installer: ./datalake_installer.sh"
+    echo "5. Or run dry test: ./gpdb_installer.sh --dry-run"
     echo ""
-    echo "For help: ./gpdb_installer.sh --help"
+    echo "For help: ./gpdb_installer.sh --help or ./datalake_installer.sh --help"
     echo "=========================================="
 }
 
@@ -980,6 +1068,7 @@ main() {
     log_info "  Dry run mode: $([ "$DRY_RUN" = true ] && echo "Enabled" || echo "Disabled")"
     log_info "  Backup existing: $([ "$BACKUP_EXISTING" = true ] && echo "Enabled" || echo "Disabled")"
     log_info "  Verify deployment: $([ "$VERIFY_DEPLOYMENT" = true ] && echo "Enabled" || echo "Disabled")"
+    log_info "  Skip RPMs: $([ "$SKIP_RPMS" = true ] && echo "Enabled" || echo "Disabled")"
     
     if [ -n "$SSH_KEY_FILE" ]; then
         log_info "  SSH key file: $SSH_KEY_FILE"
@@ -1048,8 +1137,18 @@ main() {
     
     # Create deployment package
     log_info "Creating deployment package..."
-    log_info "Collecting files: gpdb_installer.sh, lib/, tests/, docs/, config files..."
+    if [ "$SKIP_RPMS" = true ]; then
+        log_info "Collecting files: gpdb_installer.sh, lib/, tests/, docs/, config files (skipping RPMs)..."
+    else
+        log_info "Collecting files: gpdb_installer.sh, lib/, tests/, docs/, files/, config files..."
+    fi
     local package_path=$(create_deployment_package)
+    
+    # Check if package creation was successful
+    if [ -z "$package_path" ] || [ ! -f "$package_path" ]; then
+        log_error "Failed to create deployment package"
+        exit 1
+    fi
     
     # Deploy to hosts
     log_info "Starting deployment to target hosts..."

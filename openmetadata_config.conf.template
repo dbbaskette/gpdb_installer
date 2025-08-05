@@ -1,0 +1,75 @@
+# OpenMetadata Installation Configuration Template
+# 
+# INSTRUCTIONS:
+# 1. Copy this file: cp openmetadata_config.conf.template openmetadata_config.conf
+# 2. Edit openmetadata_config.conf with your actual server hostname and settings
+# 3. Run the installer: ./openmetadata_installer.sh
+#
+# OR: The installer will offer to copy this template automatically
+#
+# NOTE: openmetadata_config.conf is in .gitignore and won't be committed to git
+
+# Server host where OpenMetadata will be installed
+OPENMETADATA_HOST="openmetadata-server.example.com"
+
+# SSH user for remote deployment (must have sudo privileges)
+OPENMETADATA_SSH_USER="admin"
+
+# OpenMetadata version to install (latest stable version)
+OPENMETADATA_VERSION="1.8.0"
+
+# Docker configuration
+DOCKER_INSTALL=true
+DOCKER_COMPOSE_VERSION="2.20.0"
+
+# OpenMetadata service configuration
+OPENMETADATA_PORT=8585
+OPENMETADATA_UI_PORT=3000
+
+# Database configuration (OpenMetadata uses MySQL by default)
+# You can use existing MySQL/PostgreSQL or let OpenMetadata create its own
+OPENMETADATA_DB_TYPE="mysql"  # Options: mysql, postgresql
+OPENMETADATA_DB_HOST="localhost"
+OPENMETADATA_DB_PORT=3306
+OPENMETADATA_DB_NAME="openmetadata_db"
+OPENMETADATA_DB_USER="openmetadata_user"
+OPENMETADATA_DB_PASSWORD="your-secure-db-password-here"
+
+# OpenMetadata admin user configuration - default admin user (created automatically)
+OPENMETADATA_ADMIN_USER="admin@open-metadata.org"
+OPENMETADATA_ADMIN_PASSWORD="admin"
+
+# OpenMetadata Ingestion/Airflow service configuration
+OPENMETADATA_INGESTION_PORT=8082
+
+# Storage configuration
+OPENMETADATA_DATA_DIR="/opt/openmetadata/data"
+OPENMETADATA_LOGS_DIR="/opt/openmetadata/logs"
+
+# Security configuration
+OPENMETADATA_SECRET_KEY="your-secret-key-here"
+OPENMETADATA_ENCRYPTION_KEY="your-encryption-key-here"
+
+# Example configurations:
+#
+# Basic Setup with Default Database:
+# OPENMETADATA_HOST="om.mycompany.com"
+# OPENMETADATA_SSH_USER="admin"
+# OPENMETADATA_ADMIN_EMAIL="admin@mycompany.com"
+# OPENMETADATA_ADMIN_PASSWORD="secure-password-123"
+#
+# Production Setup with External Database:
+# OPENMETADATA_HOST="om-prod.mycompany.com"
+# OPENMETADATA_SSH_USER="deploy"
+# OPENMETADATA_DB_HOST="mysql-prod.mycompany.com"
+# OPENMETADATA_DB_USER="om_user"
+# OPENMETADATA_DB_PASSWORD="prod-secure-password"
+# OPENMETADATA_SECRET_KEY="prod-secret-key-32-chars-long"
+# OPENMETADATA_ENCRYPTION_KEY="prod-encryption-key-32-chars-long"
+#
+# Development Setup:
+# OPENMETADATA_HOST="om-dev.local"
+# OPENMETADATA_SSH_USER="developer"
+# OPENMETADATA_PORT=8586
+# OPENMETADATA_UI_PORT=3001
+# MCP_SERVER_PORT=8081 

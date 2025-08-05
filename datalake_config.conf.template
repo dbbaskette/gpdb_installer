@@ -1,0 +1,37 @@
+# Tanzu Data Lake Controller 2.0 Installation Configuration Template
+# 
+# INSTRUCTIONS:
+# 1. Copy this file: cp datalake_config.conf.template datalake_config.conf
+# 2. Edit datalake_config.conf with your actual server hostname
+# 3. Run the installer: ./datalake_installer.sh
+#
+# OR: The installer will offer to copy this template automatically
+#
+# NOTE: datalake_config.conf is in .gitignore and won't be committed to git
+
+# Controller host (where TDL Controller 2.0 will be installed)
+TDL_CONTROLLER_HOST="tdl-controller.example.com"
+
+# TDL Controller package file (place in files/ directory)
+# Download from Broadcom Support Portal
+# Example: tdl-controller-2.0.el8.x86_64.rpm or tdl-controller-2.0.el9.x86_64.rpm
+TDL_CONTROLLER_RPM="tdl-controller-2.0.0-1.el9.x86_64.rpm"
+
+# Controller web UI port (default 8080)
+TDL_CONTROLLER_PORT=8080
+
+# Initial admin user configuration
+TDL_ADMIN_NAME="Admin User"
+TDL_ADMIN_EMAIL="admin@example.com"
+TDL_ADMIN_PASSWORD="your-secure-admin-password-here"
+
+# Example configurations:
+#
+# Basic Setup:
+# TDL_CONTROLLER_HOST="tdl.mycompany.com"
+# TDL_CONTROLLER_RPM="tdl-controller-2.0.el8.x86_64.rpm"
+# TDL_ADMIN_EMAIL="admin@mycompany.com"
+#
+# RHEL 9 Setup:
+# TDL_CONTROLLER_HOST="tdl.mycompany.com"
+# TDL_CONTROLLER_RPM="tdl-controller-2.0.el9.x86_64.rpm"

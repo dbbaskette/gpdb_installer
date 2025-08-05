@@ -1,9 +1,10 @@
-# Tanzu Greenplum Database Installer
+# Tanzu Greenplum Database & OpenMetadata Installer
 
-A comprehensive automation script for installing Greenplum Database v7 on one or more servers with support for single-node and multi-node cluster configurations.
+A comprehensive automation suite for installing Greenplum Database v7 and OpenMetadata v1.8.0 on Linux servers with support for single-node and multi-node cluster configurations, Docker-based deployments, and enhanced management capabilities.
 
 ## Features
 
+### Greenplum Database Installer
 - **Flexible Deployment**: Support for single-node and multi-node cluster configurations
 - **Standby Coordinator**: Optional standby coordinator setup for high availability
 - **Automated Setup**: Complete automation of user creation, SSH configuration, and cluster initialization
@@ -13,6 +14,16 @@ A comprehensive automation script for installing Greenplum Database v7 on one or
 - **Red Hat Linux Compatible**: Optimized for RHEL/CentOS/Rocky Linux systems
 - **Remote Deployment**: Push scripts to remote servers via SSH
 - **GitHub Integration**: Create releases and upload packages automatically
+
+### OpenMetadata Installer
+- **Docker-Based Installation**: Automated Docker and Docker Compose installation
+- **Flexible Configuration**: Comprehensive configuration options via `openmetadata_config.conf` template file for services like ingestion.
+- **Multi-OS Support**: Compatible with RHEL/CentOS/Rocky Linux and Ubuntu/Debian
+- **Automated Setup**: Complete automation of Docker installation, service configuration, and initialization
+- **Service Management**: Built-in scripts for starting, stopping, and monitoring services
+- **Full Lifecycle Management**: Includes `--clean` for reinstallation, and `--remove` for complete uninstallation.
+- **Configurable Host**: Use `--host` to override the target server from the config file.
+- **Comprehensive Output**: Detailed completion summary with URLs, ports, admin credentials, and management commands.
 
 ## Prerequisites
 
@@ -63,7 +74,7 @@ mkdir -p files
 ./test_redhat_compatibility.sh
 ```
 
-### 3. Run the Installer
+### 3. Run the Greenplum Installer
 
 ```bash
 # Make the script executable
@@ -76,7 +87,29 @@ chmod +x gpdb_installer.sh
 ./gpdb_installer.sh --dry-run
 ```
 
-### 3. Configuration
+### 4. Run the OpenMetadata Installer
+
+```bash
+# Make the script executable
+chmod +x openmetadata_installer.sh
+
+# Run the installer for full installation
+./openmetadata_installer.sh
+
+# Run in dry-run mode to test
+./openmetadata_installer.sh --dry-run
+
+# Clean up and reinstall OpenMetadata
+./openmetadata_installer.sh --clean
+
+# Completely remove OpenMetadata installation
+./openmetadata_installer.sh --remove
+
+# Install to a specific host, overriding the config file
+./openmetadata_installer.sh --host user@your-remote-host
+```
+
+### 5. Configuration
 
 The installer will prompt you for the following information:
 
@@ -161,17 +194,28 @@ Run the compatibility test to verify your system:
 
 The installer includes several scripts for different purposes:
 
-- **gpdb_installer.sh**: Main installation script
-- **test_installer.sh**: Automated testing script
-- **dry_run_test.sh**: Comprehensive dry-run testing
-- **interactive_test.sh**: Interactive testing mode
+- **gpdb_installer.sh**: Main Greenplum installation script
+- **openmetadata_installer.sh**: Main OpenMetadata installation and management script
+- **cleanup_greenplum.sh**: Script to clean up a Greenplum installation
+- **datalake_installer.sh**: Script for Datalake installation (if applicable)
+- **test_installer.sh**: Automated testing script for Greenplum
+- **dry_run_test.sh**: Comprehensive dry-run testing for Greenplum
+- **interactive_test.sh**: Interactive testing mode for Greenplum
 - **package.sh**: Package creation and GitHub release script
-- **push_to_server.sh**: Remote deployment script
+- **push_to_server.sh**: Remote deployment script (used by gpdb_installer)
 - **test_redhat_compatibility.sh**: Red Hat Linux compatibility testing
+- **test_config.sh**: Test script for configuration parsing
+- **test_ssh.sh**: Test script for SSH connectivity
+- **test_validation.sh**: Test script for validation functions
 
 ## Configuration File
 
-The installer creates a `gpdb_config.conf` file that stores your configuration:
+The installers use configuration files for customizable settings:
+
+- **gpdb_config.conf.template**: Template for Greenplum Database configuration
+- **openmetadata_config.conf.template**: Template for OpenMetadata installation configuration
+
+Example `gpdb_config.conf` configuration:
 
 ```bash
 # Example configuration
@@ -180,6 +224,41 @@ GPDB_STANDBY_HOST="standby.example.com"
 GPDB_SEGMENT_HOSTS=(sdw1 sdw2 sdw3)
 GPDB_INSTALL_DIR="/usr/local/greenplum-db"
 GPDB_DATA_DIR="/data/primary"
+```
+
+Example `openmetadata_config.conf` configuration:
+
+```bash
+# OpenMetadata service configuration
+OPENMETADATA_HOST="big-data-004.kuhn-labs.com" # Hostname or IP of the OpenMetadata server
+OPENMETADATA_VERSION="1.8.10-release" # OpenMetadata version to install
+
+# Docker configuration (true/false)
+INSTALL_DOCKER=true
+
+# Database configuration (OpenMetadata uses MySQL by default)
+# You can use existing MySQL/PostgreSQL or let OpenMetadata create its own
+OPENMETADATA_DB_TYPE="mysql"  # Options: mysql, postgresql
+OPENMETADATA_DB_HOST="localhost"
+OPENMETADATA_DB_PORT=3306
+OPENMETADATA_DB_NAME="openmetadata_db"
+OPENMETADATA_DB_USER="openmetadata_user"
+OPENMETADATA_DB_PASSWORD="your-secure-db-password-here"
+
+# OpenMetadata admin user configuration - default admin user (created automatically)
+OPENMETADATA_ADMIN_USER="admin@open-metadata.org"
+OPENMETADATA_ADMIN_PASSWORD="admin"
+
+# OpenMetadata Ingestion/Airflow service configuration
+OPENMETADATA_INGESTION_PORT=8082 # Port for the Ingestion/Airflow service (e.g., 8082 to avoid conflict with 8080)
+
+# Storage configuration
+OPENMETADATA_DATA_DIR="/opt/openmetadata/data"
+OPENMETADATA_LOGS_DIR="/opt/openmetadata/logs"
+
+# SSH configuration for remote deployment
+OPENMETADATA_SSH_USER="root" # User for SSH connection to remote host
+SSH_KEY_FILE="" # Path to SSH private key file (optional)
 ```
 
 ## Post-Installation
@@ -252,19 +331,19 @@ If the installation fails partway through:
 
 ## Architecture
 
-The installer follows a phased approach:
+The installers follow a phased approach:
 
-1. **Preflight Checks**: OS compatibility, dependencies, privileges
-2. **Host Setup**: User creation, directory setup, SSH configuration
-3. **Binary Installation**: Package distribution and installation
-4. **Cluster Initialization**: Database creation and configuration
+1.  **Preflight Checks**: OS compatibility, dependencies, privileges
+2.  **Host Setup**: User creation, directory setup, SSH configuration
+3.  **Binary Installation**: Package distribution and installation (for Greenplum), or Docker image deployment (for OpenMetadata)
+4.  **Cluster Initialization**: Database creation and configuration (for Greenplum), or service startup and configuration (for OpenMetadata)
 
 ## Security Considerations
 
-- The installer creates a `gpadmin` user with sudo privileges
-- SSH keys are generated and distributed automatically
-- Database passwords should be changed after installation
-- Consider firewall rules for database ports
+- The installer creates a `gpadmin` user with sudo privileges for Greenplum.
+- SSH keys are generated and distributed automatically for Greenplum.
+- Database passwords should be changed after installation.
+- Consider firewall rules for database and application ports.
 
 ## Support
 

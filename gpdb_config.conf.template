@@ -1,6 +1,13 @@
 # Greenplum Database Installation Configuration Template
-# Copy this file to gpdb_config.conf and customize with your actual values
-# Generated on: $(date)
+# 
+# INSTRUCTIONS:
+# 1. Copy this file: cp gpdb_config.conf.template gpdb_config.conf
+# 2. Edit gpdb_config.conf with your actual server hostnames and passwords
+# 3. Run the installer: ./gpdb_installer.sh
+#
+# OR: The installer will offer to copy this template automatically
+#
+# NOTE: gpdb_config.conf is in .gitignore and won't be committed to git
 
 # Primary coordinator host (usually the first node)
 GPDB_COORDINATOR_HOST="coordinator-host.example.com"
@@ -29,9 +36,9 @@ GPADMIN_PASSWORD="your-secure-gpadmin-password-here"
 # GPDB_COORDINATOR_HOST="myserver.local"
 # GPDB_SEGMENT_HOSTS=(myserver.local)
 #
-# Three Node Setup:
-# GPDB_COORDINATOR_HOST="gpdb-master.local" 
-# GPDB_SEGMENT_HOSTS=(gpdb-node1.local gpdb-node2.local gpdb-node3.local)
+# Three Node Setup (like big-data cluster):
+# GPDB_COORDINATOR_HOST="big-data-001.kuhn-labs.com" 
+# GPDB_SEGMENT_HOSTS=(big-data-002.kuhn-labs.com big-data-003.kuhn-labs.com)
 #
 # With Standby:
 # GPDB_COORDINATOR_HOST="gpdb-master.local"

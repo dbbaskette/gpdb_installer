@@ -10,9 +10,9 @@ set -eE  # Exit on error and inherit error handling to functions
 trap 'handle_error $? $LINENO $BASH_LINENO "$BASH_COMMAND" "${FUNCNAME[*]}"' ERR
 
 # Error tracking variables
-declare -g ERROR_LOG="/tmp/gpdb_installer_errors.log"
-declare -g CLEANUP_FUNCTIONS=()
-declare -g ROLLBACK_FUNCTIONS=()
+ERROR_LOG="/tmp/gpdb_installer_errors.log"
+CLEANUP_FUNCTIONS=()
+ROLLBACK_FUNCTIONS=()
 
 # Function to handle errors
 handle_error() {
@@ -284,12 +284,20 @@ log_and_execute() {
 # Standard cleanup functions
 cleanup_ssh_sockets() {
     log_info "Cleaning up SSH control sockets..."
-    rm -f /tmp/ssh_mux_* 2>/dev/null || true
+    # Use the comprehensive SSH cleanup from ssh.sh if available
+    if declare -f cleanup_ssh_connections > /dev/null; then
+        cleanup_ssh_connections
+    else
+        # Fallback to basic cleanup
+        rm -f /tmp/ssh_mux_* 2>/dev/null || true
+    fi
 }
 
 cleanup_temp_files() {
     log_info "Cleaning up temporary files..."
-    rm -f /tmp/gpinitsystem_config /tmp/machine_list 2>/dev/null || true
+    # Only clean up installer-specific temp files
+    rm -f /tmp/gpdb_installer_*.log 2>/dev/null || true
+    # Leave gpinitsystem_config and machine_list in place - they can be cleaned up later by cleanup script or final step
 }
 
 cleanup_partial_installation() {

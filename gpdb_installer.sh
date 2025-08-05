@@ -13,8 +13,8 @@ readonly INSTALL_FILES_DIR="files"
 DRY_RUN=false
 PHASES=(
     "Initialization:3"
-    "Pre-flight Checks:6"
-    "Host Setup:3"
+    "Pre-flight Checks:8"
+    "Host Setup:2"
     "Greenplum Installation:4"
     "Completion:1"
 )
@@ -114,6 +114,8 @@ parse_arguments() {
 phase_initialization() {
     if [ -f "$STATE_DIR/.step_phase_initialization" ]; then
         log_info "Initialization phase already completed, skipping."
+        # Still need to load configuration even if initialization was skipped
+        load_configuration "$CONFIG_FILE"
         return
     fi
     report_phase_start 1 "Initialization"
@@ -148,6 +150,8 @@ phase_initialization() {
 phase_preflight_checks() {
     if [ -f "$STATE_DIR/.step_phase_preflight" ]; then
         log_info "Pre-flight Checks phase already completed, skipping."
+        # Ensure configuration is loaded
+        load_configuration "$CONFIG_FILE" 2>/dev/null || true
         return
     fi
     report_phase_start 2 "Pre-flight Checks"
@@ -155,27 +159,39 @@ phase_preflight_checks() {
     local all_hosts=($(get_all_hosts))
     
     increment_step
-    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking privileges"
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Collecting credentials"
+    collect_credentials
+    
+    increment_step
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Establishing SSH connections"
+    # Clean up any existing SSH connections first to start fresh
+    cleanup_all_ssh_connections
+    cleanup_remote_ssh_connections "${all_hosts[@]}"
+    log_info "Establishing SSH master connections to avoid repeated password prompts..."
+    establish_ssh_connections "${all_hosts[@]}"
+    
+    increment_step
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking privileges"
     check_sudo_privileges
     
     increment_step
-    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking OS compatibility"
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking OS compatibility"
     check_os_compatibility "${all_hosts[@]}"
     
     increment_step
-    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking dependencies"
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking dependencies"
     check_dependencies "${all_hosts[@]}"
     
     increment_step
-    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking system resources"
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking system resources"
     check_system_resources
     
     increment_step
-    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking Greenplum compatibility"
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking Greenplum compatibility"
     check_greenplum_compatibility "$INSTALL_FILES_DIR"
     
     increment_step
-    report_progress "Pre-flight Checks" $CURRENT_STEP 6 "Checking network connectivity"
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking network connectivity"
     check_network_connectivity "${all_hosts[@]}"
     
     report_phase_complete "Pre-flight Checks"
@@ -186,6 +202,8 @@ phase_preflight_checks() {
 phase_host_setup() {
     if [ -f "$STATE_DIR/.step_phase_host_setup" ]; then
         log_info "Host Setup phase already completed, skipping."
+        # Ensure configuration is loaded
+        load_configuration "$CONFIG_FILE" 2>/dev/null || true
         return
     fi
     report_phase_start 3 "Host Setup"
@@ -193,16 +211,13 @@ phase_host_setup() {
     local all_hosts=($(get_all_hosts))
     
     increment_step
-    report_progress "Host Setup" $CURRENT_STEP 3 "Collecting credentials"
-    collect_credentials
-    
-    increment_step
-    report_progress "Host Setup" $CURRENT_STEP 3 "Setting up users and directories"
+    report_progress "Host Setup" $CURRENT_STEP 2 "Setting up users and directories"
     setup_users_and_directories "${all_hosts[@]}"
     
     increment_step
-    report_progress "Host Setup" $CURRENT_STEP 3 "Configuring SSH"
+    report_progress "Host Setup" $CURRENT_STEP 2 "Configuring SSH and firewall"
     configure_ssh_access "${all_hosts[@]}"
+    configure_greenplum_firewall "${all_hosts[@]}"
     
     report_phase_complete "Host Setup"
     touch "$STATE_DIR/.step_phase_host_setup"
@@ -217,6 +232,9 @@ phase_greenplum_installation() {
     report_phase_start 4 "Greenplum Installation"
     
     local all_hosts=($(get_all_hosts))
+    
+    # Ensure SSH connections are still available before starting installation
+    ensure_ssh_connections "${all_hosts[@]}"
     
     increment_step
     report_progress "Greenplum Installation" $CURRENT_STEP 4 "Finding installer"
@@ -253,14 +271,36 @@ phase_completion() {
     increment_step
     report_progress "Completion" $CURRENT_STEP 1 "Final verification"
     
-    # Test cluster connectivity
-    if test_greenplum_connectivity "$GPDB_COORDINATOR_HOST"; then
-        log_success_with_timestamp "Greenplum installation completed successfully!"
-        log_info "Connect to your database with: sudo -u gpadmin psql -d tdi"
-        log_info "Check cluster status with: sudo -u gpadmin gpstate -s"
+    # Test cluster connectivity and provide detailed status
+    log_info "Performing final cluster verification..."
+    
+    # Check if cluster is running
+    if ssh_execute "$GPDB_COORDINATOR_HOST" "sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'" "" "30" "true" 2>/dev/null; then
+        log_success "✅ Cluster status check passed"
+        
+        # Test database connectivity
+        if test_greenplum_connectivity "$GPDB_COORDINATOR_HOST"; then
+            log_success_with_timestamp "🎉 Greenplum installation completed successfully!"
+            echo ""
+            log_info "=== Connection Information ==="
+            log_info "Database Host: $GPDB_COORDINATOR_HOST"
+            log_info "Database Name: tdi"
+            log_info "Admin User: gpadmin"
+            echo ""
+            log_info "=== Quick Commands ==="
+            log_info "Connect to database: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'psql -d tdi'"
+            log_info "Check cluster status: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'gpstate -s'"
+            log_info "Stop cluster: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'gpstop -a'"
+            log_info "Start cluster: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'gpstart -a'"
+        else
+            log_warn "⚠️ Cluster is running but connectivity test failed"
+            log_info "The cluster may be initializing. Try connecting manually:"
+            log_info "ssh $GPDB_COORDINATOR_HOST -l gpadmin 'psql -d tdi'"
+        fi
     else
-        log_warn "Installation completed but connectivity test failed"
-        log_info "Please check the troubleshooting guide for assistance"
+        log_warn "⚠️ Cluster status check failed"
+        log_info "The cluster may not be running. Try starting it manually:"
+        log_info "ssh $GPDB_COORDINATOR_HOST -l gpadmin 'gpstart -a'"
     fi
     
     report_phase_complete "Completion"
@@ -271,22 +311,50 @@ phase_completion() {
 collect_credentials() {
     log_info "Collecting user credentials..."
     
+    # Ask if SSH password is consistent across all hosts
+    echo ""
+    log_info "SSH Access Configuration:"
+    echo "  Target hosts: $(get_all_hosts)"
+    echo ""
+    read -p "Do all hosts use the same SSH password for root? (y/n) [y]: " same_ssh_password
+    same_ssh_password=${same_ssh_password:-y}
+    
+    if [[ "$same_ssh_password" =~ ^[Yy]$ ]]; then
+        read -s -p "Enter SSH password for all hosts: " SSH_PASSWORD
+        echo ""
+        if [ -z "$SSH_PASSWORD" ]; then
+            log_error "SSH password cannot be empty"
+        fi
+        export SSH_PASSWORD
+        export SSHPASS="$SSH_PASSWORD"
+        log_success "SSH password will be used for all hosts"
+    else
+        log_warn "SSH password collection disabled - you'll be prompted for each connection"
+        unset SSH_PASSWORD
+        unset SSHPASS
+    fi
+    
     # Get sudo password
+    echo ""
     read -s -p "Enter sudo password for all hosts: " SUDO_PASSWORD
     echo ""
     if [ -z "$SUDO_PASSWORD" ]; then
         log_error "Sudo password cannot be empty"
     fi
     
-    # Get gpadmin password
-    read -s -p "Enter password for gpadmin user: " GPADMIN_PASSWORD
-    echo ""
+    # Get gpadmin password (use from config if available)
     if [ -z "$GPADMIN_PASSWORD" ]; then
-        log_error "Gpadmin password cannot be empty"
+        read -s -p "Enter password for gpadmin user: " GPADMIN_PASSWORD
+        echo ""
+        if [ -z "$GPADMIN_PASSWORD" ]; then
+            log_error "Gpadmin password cannot be empty"
+        fi
+        
+        # Validate password strength
+        validate_password "$GPADMIN_PASSWORD" "gpadmin"
+    else
+        log_info "Using gpadmin password from configuration file"
     fi
-    
-    # Validate password strength
-    validate_password "$GPADMIN_PASSWORD" "gpadmin"
     
     log_success "Credentials collected"
 }
@@ -300,11 +368,6 @@ setup_users_and_directories() {
     for host in "${hosts[@]}"; do
         log_info "Setting up host: $host"
         create_gpadmin_user "$host"
-        if [ "$host" = "$GPDB_COORDINATOR_HOST" ]; then
-            create_and_chown_dir "$host" "$COORDINATOR_DATA_DIR"
-        else
-            create_and_chown_dir "$host" "$SEGMENT_DATA_DIR"
-        fi
     done
     
     log_success "Users and directories setup completed"
@@ -316,8 +379,26 @@ create_gpadmin_user() {
     
     log_info "Creating gpadmin user on $host..."
     
+    # Debug: show variables before creating remote script
+    log_info "Debug: GPDB_DATA_ROOT='$GPDB_DATA_ROOT'"
+    
+    # Expand variables before creating remote script
+    local data_root="$GPDB_DATA_ROOT"
+    local gpadmin_password="$GPADMIN_PASSWORD"
+    local sudo_password="$SUDO_PASSWORD"
+    
+    # Debug: show expanded variables
+    log_info "Debug: data_root='$data_root'"
+    
+    # Validate required variables
+    if [ -z "$data_root" ]; then
+        log_error "GPDB_DATA_ROOT is not set or is empty"
+        return 1
+    fi
+    
     local remote_script="
         set -e
+        echo \"Debug: Creating data root directory '$data_root' and subdirectories\"
         if ! getent group gpadmin > /dev/null; then
             groupadd gpadmin
         fi
@@ -326,39 +407,22 @@ create_gpadmin_user() {
             useradd -g gpadmin -m -d /home/gpadmin gpadmin
         fi
         
-        echo \"gpadmin:$GPADMIN_PASSWORD\" | chpasswd
+        echo \"gpadmin:$gpadmin_password\" | chpasswd
         
-        # Create directories
-        mkdir -p \"/usr/local\" \"$GPDB_DATA_DIR\"
-        chown -R gpadmin:gpadmin \"/usr/local\" \"$GPDB_DATA_DIR\"
-        chmod 755 \"/usr/local\" \"$GPDB_DATA_DIR\"
+        # Create data root and subdirectories
+        mkdir -p \"/usr/local\" \"$data_root\" \"$data_root/coordinator\" \"$data_root/primary\" \"$data_root/mirror\"
+        chown -R gpadmin:gpadmin \"/usr/local\" \"$data_root\"
+        chmod 755 \"/usr/local\" \"$data_root\" \"$data_root/coordinator\" \"$data_root/primary\" \"$data_root/mirror\"
     "
     
-    execute_command "ssh_execute '$host' \"echo '$SUDO_PASSWORD' | sudo -S bash -c '$remote_script'\""
+    # Execute the remote script
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY-RUN] Would execute user creation script on $host"
+    else
+        ssh_execute "$host" "echo '$sudo_password' | sudo -S bash -c \"$remote_script\""
+    fi
 }
 
-# Function to create data directories on a single host
-create_data_directories_single() {
-    local host="$1"
-    
-    log_info "Creating data directories on $host..."
-    
-    # Create master directory
-    execute_command "ssh_execute '$host' 'sudo -u gpadmin mkdir -p $GPDB_DATA_DIR/master'"
-    execute_command "ssh_execute '$host' 'sudo -u gpadmin chmod 755 $GPDB_DATA_DIR/master'"
-    
-    # Create segment directories
-    local i=0
-    for segment_host in "${GPDB_SEGMENT_HOSTS[@]}"; do
-        if [ "$segment_host" = "$host" ]; then
-            execute_command "ssh_execute '$host' 'sudo -u gpadmin mkdir -p $GPDB_DATA_DIR/primary$i'"
-            execute_command "ssh_execute '$host' 'sudo -u gpadmin chmod 755 $GPDB_DATA_DIR/primary$i'"
-        fi
-        i=$((i + 1))
-    done
-    # After all data directories are created (in create_data_directories_single), recursively chown the parent of the data directory as well
-    execute_command "ssh_execute '$host' 'sudo chown -R gpadmin:gpadmin $(dirname $GPDB_DATA_DIR)'"
-}
 
 # Function to configure SSH access
 configure_ssh_access() {
@@ -405,12 +469,54 @@ initialize_cluster() {
     
     log_info "Initializing Greenplum cluster..."
     
-    # Generate configuration
-    local config_file=$(generate_gpinitsystem_config "$GPDB_COORDINATOR_HOST" "${GPDB_SEGMENT_HOSTS[@]}")
+    # Ensure configuration is loaded (safety check)
+    if [ -z "$GPDB_COORDINATOR_HOST" ] || [ -z "$COORDINATOR_DATA_DIR" ]; then
+        log_info "Reloading configuration..."
+        load_configuration "$CONFIG_FILE"
+    fi
+    
+    # Debug: Show variables before generating config
+    log_info "Debug - Configuration variables:"
+    log_info "  GPDB_COORDINATOR_HOST: '$GPDB_COORDINATOR_HOST'"
+    log_info "  GPDB_SEGMENT_HOSTS: '${GPDB_SEGMENT_HOSTS[@]}'"
+    log_info "  COORDINATOR_DATA_DIR: '$COORDINATOR_DATA_DIR'"
+    log_info "  SEGMENT_DATA_DIR: '$SEGMENT_DATA_DIR'"
+    log_info "  MIRROR_DATA_DIR: '$MIRROR_DATA_DIR'"
+    
+    # Generate configuration using library function
+    log_info "Calling generate_gpinitsystem_config..."
+    
+    # Call function directly - no output capture at all
+    generate_gpinitsystem_config "$GPDB_COORDINATOR_HOST" "${GPDB_SEGMENT_HOSTS[@]}"
+    
+    # Files should now exist
+    local config_file="/tmp/gpinitsystem_config"
     local machine_list_file="/tmp/machine_list"
+    
+    # Verify files were created
+    if [ ! -f "$config_file" ] || [ ! -f "$machine_list_file" ]; then
+        log_error "Configuration files were not created"
+        log_error "  Config file exists: $([ -f "$config_file" ] && echo "YES" || echo "NO")"
+        log_error "  Machine list exists: $([ -f "$machine_list_file" ] && echo "YES" || echo "NO")"
+        ls -la /tmp/gpinitsystem* /tmp/machine* 2>/dev/null || log_error "No temp files found"
+        return 1
+    fi
+    
+    log_success "Configuration files verified: $config_file"
     
     # Create data directories
     create_data_directories "${all_hosts[@]}"
+    
+    # Final verification before cluster initialization
+    log_info "Final check before cluster initialization..."
+    if [ ! -f "$config_file" ] || [ ! -f "$machine_list_file" ]; then
+        log_error "Config files disappeared before cluster initialization!"
+        log_error "Config file exists: $([ -f "$config_file" ] && echo YES || echo NO)"
+        log_error "Machine list exists: $([ -f "$machine_list_file" ] && echo YES || echo NO)"
+        ls -la /tmp/gp* /tmp/machine* 2>/dev/null || true
+        return 1
+    fi
+    log_info "Config files still exist, proceeding with cluster initialization"
     
     # Initialize cluster
     initialize_greenplum_cluster "$GPDB_COORDINATOR_HOST" "$config_file" "$machine_list_file"
@@ -422,7 +528,7 @@ initialize_cluster() {
     configure_pg_hba "$GPDB_COORDINATOR_HOST" "${all_hosts[@]}"
     
     # Restart cluster
-    restart_greenplum_cluster "$GPDB_COORDINATOR_HOST"
+    # restart_greenplum_cluster "$GPDB_COORDINATOR_HOST"
     
     log_success "Cluster initialization completed"
 }
@@ -432,55 +538,19 @@ clean_greenplum() {
     local all_hosts=($(get_all_hosts))
     log_warn "CLEAN MODE: This will remove Greenplum and all data directories from all hosts!"
     for host in "${all_hosts[@]}"; do
-        log_info "[CLEAN] Removing data directory $GPDB_DATA_DIR on $host..."
-        execute_command "ssh_execute '$host' 'sudo rm -rf $GPDB_DATA_DIR'"
-        log_info "[CLEAN] Attempting to remove parent directory $(dirname $GPDB_DATA_DIR) on $host (if empty)..."
-        execute_command "ssh_execute '$host' 'sudo rmdir $(dirname $GPDB_DATA_DIR) 2>/dev/null || true'"
+        log_info "[CLEAN] Removing data root directory $GPDB_DATA_ROOT on $host..."
+        execute_command "ssh_execute '$host' 'sudo rm -rf $GPDB_DATA_ROOT'"
+        log_info "[CLEAN] Attempting to remove parent directory $(dirname $GPDB_DATA_ROOT) on $host (if empty)..."
+        execute_command "ssh_execute '$host' 'sudo rmdir $(dirname $GPDB_DATA_ROOT) 2>/dev/null || true'"
         log_info "[CLEAN] Uninstalling Greenplum on $host..."
         execute_command "ssh_execute '$host' 'sudo yum remove -y greenplum-db-7'"
     done
     log_success "Greenplum and all data directories removed from all hosts."
 }
 
-# Function to create and chown a directory
-create_and_chown_dir() {
-    local host="$1"
-    local dir="$2"
-    execute_command "ssh_execute '$host' 'sudo mkdir -p $dir && sudo chown -R gpadmin:gpadmin $dir'"
-}
 
-# Function to generate gpinitsystem_config
-generate_gpinitsystem_config() {
-    local coordinator_host="$1"
-    shift
-    local segment_hosts=("$@")
-    local config_file="/tmp/gpinitsystem_config"
-    echo "ARRAY_NAME=\"TDI Greenplum Cluster\"" > "$config_file"
-    echo "SEG_PREFIX=gpseg" >> "$config_file"
-    echo "PORT_BASE=40000" >> "$config_file"
-    echo "COORDINATOR_HOSTNAME=$coordinator_host" >> "$config_file"
-    echo "COORDINATOR_DIRECTORY=$COORDINATOR_DATA_DIR" >> "$config_file"
-    echo "COORDINATOR_PORT=5432" >> "$config_file"
-    echo "DATABASE_NAME=tdi" >> "$config_file"
-    echo "ENCODING=UNICODE" >> "$config_file"
-    echo "LOCALE=en_US.utf8" >> "$config_file"
-    echo "CHECK_POINT_SEGMENTS=8" >> "$config_file"
-    # DATA_DIRECTORY array for segments
-    echo -n "declare -a DATA_DIRECTORY=(" >> "$config_file"
-    for host in "${segment_hosts[@]}"; do
-        echo -n "$SEGMENT_DATA_DIR " >> "$config_file"
-    done
-    echo ")" >> "$config_file"
-    echo "$config_file"
-}
-
-# Function to initialize the cluster
-initialize_greenplum_cluster() {
-    local coordinator_host="$1"
-    local config_file="$2"
-    local machine_list_file="$3"
-    execute_command ssh "$coordinator_host" "source /usr/local/greenplum-db/greenplum_path.sh && export COORDINATOR_DATA_DIRECTORY=$COORDINATOR_DATA_DIR && gpinitsystem -c $config_file -h $machine_list_file"
-}
+# Note: gpinitsystem configuration generation and cluster initialization 
+# functions are now handled by lib/greenplum.sh
 
 # Main execution function
 main() {
@@ -509,6 +579,8 @@ main() {
     phase_completion
     
     log_success_with_timestamp "Installation completed successfully!"
+    
+    # Leave temporary files in place for potential debugging or cleanup script to handle
 }
 
 # Execute main function with all arguments

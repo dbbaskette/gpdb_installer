@@ -3,6 +3,9 @@
 
 # Configuration files (may contain sensitive data)
 gpdb_config.conf
+datalake_config.conf
+openmetadata_config.conf
+.release.conf
 
 # Installer files directory (contains actual Greenplum RPMs)
 files/*
@@ -32,4 +35,6 @@ Thumbs.db
 
 # Backup files
 *.backup
-*.bak 
+*.bak release.sh
+.release-exec
+release.sh

@@ -207,6 +207,52 @@ check_greenplum_compatibility() {
     fi
 }
 
+# Function to configure firewall for Greenplum ports
+configure_greenplum_firewall() {
+    local hosts=("$@")
+    
+    log_info "Configuring firewall for Greenplum ports on all hosts..."
+    
+    for host in "${hosts[@]}"; do
+        log_info "Configuring firewall on $host..."
+        
+        local firewall_script="
+            # Check if firewalld is running
+            if systemctl is-active --quiet firewalld; then
+                echo 'Configuring firewalld for Greenplum ports...'
+                
+                # Allow Greenplum segment ports (40000-40010)
+                firewall-cmd --permanent --add-port=40000-40010/tcp
+                
+                # Allow Greenplum mirror ports (50000-50010)  
+                firewall-cmd --permanent --add-port=50000-50010/tcp
+                
+                # Allow Greenplum replication ports (51000-51010, 52000-52010)
+                firewall-cmd --permanent --add-port=51000-51010/tcp
+                firewall-cmd --permanent --add-port=52000-52010/tcp
+                
+                # Allow PostgreSQL coordinator port (5432)
+                firewall-cmd --permanent --add-port=5432/tcp
+                
+                # Reload firewall rules
+                firewall-cmd --reload
+                
+                echo 'Firewall configured for Greenplum'
+            else
+                echo 'firewalld is not running, skipping firewall configuration'
+            fi
+        "
+        
+        if ssh_execute "$host" "sudo bash -c '$firewall_script'"; then
+            log_success "Firewall configured on $host"
+        else
+            log_warn "Failed to configure firewall on $host (continuing anyway)"
+        fi
+    done
+    
+    log_success "Firewall configuration completed"
+}
+
 # Function to check library versions
 check_library_versions() {
     log_info "Checking required library versions..."

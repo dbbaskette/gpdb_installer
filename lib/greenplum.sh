@@ -187,14 +187,12 @@ generate_gpinitsystem_config() {
     local segment_hosts=("${@:2}")
     
     log_info "Generating gpinitsystem_config file..." >&2
+    log_info "Debug: COORDINATOR_DATA_DIR='$COORDINATOR_DATA_DIR'" >&2
+    log_info "Debug: SEGMENT_DATA_DIR='$SEGMENT_DATA_DIR'" >&2
+    log_info "Debug: MIRROR_DATA_DIR='$MIRROR_DATA_DIR'" >&2
     
-    # Determine segment prefix
-    local segment_prefix
-    if [[ ${#segment_hosts[@]} -gt 1 ]]; then
-        segment_prefix=$(echo "${segment_hosts[0]}" | sed 's/[0-9]*$//')
-    else
-        segment_prefix="sdw"
-    fi
+    # Use standard Greenplum segment prefix
+    local segment_prefix="gpseg"
     
     local gpinitsystem_config="/tmp/gpinitsystem_config"
     cat > "$gpinitsystem_config" <<EOL
@@ -202,11 +200,11 @@ ARRAY_NAME="TDI Greenplum Cluster"
 SEG_PREFIX=$segment_prefix
 PORT_BASE=40000
 COORDINATOR_HOSTNAME=$coordinator_host
-COORDINATOR_DIRECTORY=$GPDB_DATA_DIR/master
+COORDINATOR_DIRECTORY=$COORDINATOR_DATA_DIR
 COORDINATOR_PORT=5432
 DATABASE_NAME=tdi
 ENCODING=UNICODE
-LOCALE=en_US.utf8
+LOCALE=en_US.UTF-8
 CHECK_POINT_SEGMENTS=8
 EOL
     
@@ -225,11 +223,11 @@ EOL
     
     echo "MACHINE_LIST_FILE=$machine_list_file" >> "$gpinitsystem_config"
     
-    # Add primary segment configuration
+    # Add primary segment configuration (single array with all directories)
     echo -n "declare -a DATA_DIRECTORY=(" >> "$gpinitsystem_config"
     local i=0
     for host in "${segment_hosts[@]}"; do
-        echo -n "$GPDB_DATA_DIR/primary$i " >> "$gpinitsystem_config"
+        echo -n "$SEGMENT_DATA_DIR/seg$i " >> "$gpinitsystem_config"
         i=$((i + 1))
     done
     echo ")" >> "$gpinitsystem_config"
@@ -239,7 +237,7 @@ EOL
         echo -n "declare -a MIRROR_DATA_DIRECTORY=(" >> "$gpinitsystem_config"
         local j=0
         for host in "${segment_hosts[@]}"; do
-            echo -n "$GPDB_DATA_DIR/mirror$j " >> "$gpinitsystem_config"
+            echo -n "$MIRROR_DATA_DIR/seg$j " >> "$gpinitsystem_config"
             j=$((j + 1))
         done
         echo ")" >> "$gpinitsystem_config"
@@ -254,6 +252,11 @@ EOL
         echo "STANDBY_MASTER_HOSTNAME=$GPDB_STANDBY_HOST" >> "$gpinitsystem_config"
     fi
     
+    # Debug: show what we generated
+    log_info "=== Generated configuration content ===" >&2
+    cat "$gpinitsystem_config" >&2
+    log_info "=== End configuration ===" >&2
+    
     log_success "Generated gpinitsystem_config at $gpinitsystem_config" >&2
     echo "$gpinitsystem_config"
 }
@@ -262,41 +265,32 @@ EOL
 create_data_directories() {
     local hosts=("$@")
     
-    log_info "Creating data directories on all hosts..."
+    log_info "Creating specific segment data directories on all hosts..."
     
-    for host in "${hosts[@]}"; do
-        log_info "Creating data directories on $host..."
+    # Create coordinator segment directory
+    log_info "Creating coordinator segment directory on $GPDB_COORDINATOR_HOST..."
+    ssh_execute "$GPDB_COORDINATOR_HOST" "sudo -u gpadmin mkdir -p $COORDINATOR_DATA_DIR/gpseg-1"
+    ssh_execute "$GPDB_COORDINATOR_HOST" "sudo -u gpadmin chmod 755 $COORDINATOR_DATA_DIR/gpseg-1"
+    
+    # Create primary segment directories to match the configuration file exactly
+    # Each segment host gets ALL segment directories (gpinitsystem will use them as needed)
+    local total_segments=${#GPDB_SEGMENT_HOSTS[@]}
+    
+    for segment_host in "${GPDB_SEGMENT_HOSTS[@]}"; do
+        log_info "Creating segment directories on $segment_host..."
         
-        # Create master directory (only on coordinator)
-        if [ "$host" = "$GPDB_COORDINATOR_HOST" ]; then
-            ssh_execute "$host" "sudo -u gpadmin mkdir -p $GPDB_DATA_DIR/master"
-            ssh_execute "$host" "sudo -u gpadmin chmod 755 $GPDB_DATA_DIR/master"
-        fi
+        # Create all segment directories on each host
+        for ((seg_id=0; seg_id<total_segments; seg_id++)); do
+            log_info "Creating primary segment directory seg$seg_id on $segment_host..."
+            ssh_execute "$segment_host" "sudo -u gpadmin mkdir -p $SEGMENT_DATA_DIR/seg$seg_id"
+            ssh_execute "$segment_host" "sudo -u gpadmin chmod 755 $SEGMENT_DATA_DIR/seg$seg_id"
+        done
         
-        # Create primary directories for segments
-        local primary_count=0
-        local mirror_count=0
-        
-        for segment_host in "${GPDB_SEGMENT_HOSTS[@]}"; do
-            if [ "$segment_host" = "$host" ]; then
-                # Create primary segment directory
-                ssh_execute "$host" "sudo -u gpadmin mkdir -p $GPDB_DATA_DIR/primary$primary_count"
-                ssh_execute "$host" "sudo -u gpadmin chmod 755 $GPDB_DATA_DIR/primary$primary_count"
-                primary_count=$((primary_count + 1))
-                
-                # Create mirror directory (for production setups)
-                # Mirrors are placed on different hosts in round-robin fashion
-                local mirror_host_index=$((primary_count % ${#GPDB_SEGMENT_HOSTS[@]}))
-                local mirror_host="${GPDB_SEGMENT_HOSTS[$mirror_host_index]}"
-                
-                # Only create mirror if it's on a different host (multi-node setup)
-                if [ "$mirror_host" != "$host" ] && [ ${#GPDB_SEGMENT_HOSTS[@]} -gt 1 ]; then
-                    log_info "Creating mirror directory for segment $primary_count on $mirror_host"
-                    ssh_execute "$mirror_host" "sudo -u gpadmin mkdir -p $GPDB_DATA_DIR/mirror$mirror_count"
-                    ssh_execute "$mirror_host" "sudo -u gpadmin chmod 755 $GPDB_DATA_DIR/mirror$mirror_count"
-                    mirror_count=$((mirror_count + 1))
-                fi
-            fi
+        # Create mirror directories (always create them to ensure availability)
+        for ((seg_id=0; seg_id<total_segments; seg_id++)); do
+            log_info "Creating mirror directory seg$seg_id on $segment_host..."
+            ssh_execute "$segment_host" "sudo -u gpadmin mkdir -p $MIRROR_DATA_DIR/seg$seg_id"
+            ssh_execute "$segment_host" "sudo -u gpadmin chmod 755 $MIRROR_DATA_DIR/seg$seg_id"
         done
     done
 }
@@ -309,6 +303,9 @@ initialize_greenplum_cluster() {
     
     log_info "Initializing Greenplum cluster..."
     
+    # Remove any existing configuration files from gpadmin home only
+    ssh_execute "$coordinator_host" "sudo rm -f /home/gpadmin/gpinitsystem_config /home/gpadmin/machine_list"
+    
     # Copy configuration files to coordinator
     ssh_copy_file "$config_file" "$coordinator_host" "/tmp/"
     ssh_copy_file "$machine_list_file" "$coordinator_host" "/tmp/"
@@ -316,14 +313,122 @@ initialize_greenplum_cluster() {
     # Move files to gpadmin home with proper permissions
     ssh_execute "$coordinator_host" "sudo cp /tmp/gpinitsystem_config /home/gpadmin/ && sudo cp /tmp/machine_list /home/gpadmin/ && sudo chown gpadmin:gpadmin /home/gpadmin/gpinitsystem_config /home/gpadmin/machine_list"
     
-    # Run gpinitsystem
-    local init_command="cd /home/gpadmin && source $GPHOME/greenplum_path.sh && $GPHOME/bin/gpinitsystem -c /home/gpadmin/gpinitsystem_config -a"
+    # Create a script file for gpinitsystem to avoid quoting issues
+    local gpinit_script="/tmp/gpinitsystem_script.sh"
+    cat > "$gpinit_script" << 'GPINIT_EOF'
+#!/bin/bash
+set -e
+cd /home/gpadmin
+
+# Set GPHOME from parameter
+export GPHOME="$1"
+echo "GPHOME set to: $GPHOME"
+
+# Source Greenplum environment
+if [ -f "$GPHOME/greenplum_path.sh" ]; then
+    source "$GPHOME/greenplum_path.sh"
+    echo "Greenplum environment sourced successfully"
+else
+    echo "ERROR: greenplum_path.sh not found at $GPHOME/greenplum_path.sh"
+    exit 1
+fi
+
+# Verify gpinitsystem is available
+if [ -x "$GPHOME/bin/gpinitsystem" ]; then
+    echo "Found gpinitsystem at $GPHOME/bin/gpinitsystem"
+else
+    echo "ERROR: gpinitsystem not found or not executable at $GPHOME/bin/gpinitsystem"
+    exit 1
+fi
+
+# Clean up any existing Greenplum data directories first
+echo "Cleaning up any existing Greenplum data directories..."
+
+# Clean up any existing data directories based on common patterns
+# This is more robust than parsing the config file
+echo "Removing any existing coordinator directories..."
+rm -rf /home/gpdata/coordinator/* 2>/dev/null || true
+rm -rf /home/gpdata/primary/* 2>/dev/null || true  
+rm -rf /home/gpdata/mirror/* 2>/dev/null || true
+rm -rf /data/coordinator/* 2>/dev/null || true
+rm -rf /data/primary/* 2>/dev/null || true
+rm -rf /data/mirror/* 2>/dev/null || true
+
+# Also clean up any gpdb specific processes that might be running
+echo "Stopping any existing Greenplum processes..."
+pkill -f "postgres.*gp" 2>/dev/null || true
+pkill -f "gpsync" 2>/dev/null || true
+
+# Remove any existing shared memory and semaphores
+echo "Cleaning up shared memory..."
+ipcs -m | grep gpadmin | awk '{print $2}' | xargs -r ipcrm -m 2>/dev/null || true
+ipcs -s | grep gpadmin | awk '{print $2}' | xargs -r ipcrm -s 2>/dev/null || true
+
+echo "Cleanup completed."
+
+# Debug: Show the config file content
+echo "=== Configuration file content ==="
+cat /home/gpadmin/gpinitsystem_config
+echo "=== End configuration ==="
+
+# Run gpinitsystem
+echo "Running gpinitsystem..."
+timeout 600 "$GPHOME/bin/gpinitsystem" -c /home/gpadmin/gpinitsystem_config -a
+
+# If gpinitsystem timed out, check if cluster is actually working
+if [ $? -eq 124 ]; then
+    echo "gpinitsystem timed out, checking if cluster is actually running..."
+    sleep 5
     
-    if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c '$init_command'"; then
+    # Set environment variables for testing
+    export COORDINATOR_DATA_DIRECTORY=/home/gpdata/coordinator/gpseg-1
+    export MASTER_HOST=$(hostname -f)
+    
+    # Test if we can connect to the database
+    if psql -d tdi -c "SELECT 'Cluster is working!' as status;" 2>/dev/null; then
+        echo "SUCCESS: Cluster is running despite timeout!"
+        exit 0
+    else
+        echo "Attempting to start cluster manually..."
+        if gpstart -a; then
+            echo "SUCCESS: Cluster started manually!"
+            exit 0
+        else
+            echo "FAILED: Could not start cluster"
+            exit 1
+        fi
+    fi
+fi
+GPINIT_EOF
+    
+    # Copy script to coordinator and execute
+    log_info "Executing gpinitsystem with GPHOME=$GPHOME"
+    ssh_copy_file "$gpinit_script" "$coordinator_host" "/tmp/"
+    
+    # Execute with timeout to prevent hanging
+    log_info "Starting gpinitsystem (this may take several minutes)..."
+    if ssh_execute "$coordinator_host" "chmod +x /tmp/gpinitsystem_script.sh && timeout 600 sudo -u gpadmin /tmp/gpinitsystem_script.sh '$GPHOME' && rm -f /tmp/gpinitsystem_script.sh" "" "300"; then
         log_success "Greenplum cluster initialized successfully"
     else
-        log_error "gpinitsystem failed"
+        log_warn "gpinitsystem timed out or encountered an error"
+        log_info "Checking if cluster was actually created successfully..."
+        
+        # Check if cluster is running despite timeout
+        if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'" "" "30" "true" 2>/dev/null; then
+            log_success "Cluster appears to be running successfully despite timeout"
+        else
+            log_info "Attempting to start cluster..."
+            if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c 'source $GPHOME/greenplum_path.sh && gpstart -a'" "" "60" "true" 2>/dev/null; then
+                log_success "Cluster started successfully"
+            else
+                log_error "gpinitsystem failed - cluster is not running"
+                return 1
+            fi
+        fi
     fi
+    
+    # Clean up local script
+    rm -f "$gpinit_script"
 }
 
 # Function to setup persistent environment for gpadmin
@@ -332,44 +437,57 @@ setup_gpadmin_environment() {
     
     log_info_with_timestamp "Setting up persistent environment variables for gpadmin..."
     
-    local env_setup="
-# Greenplum Environment Setup - Auto-generated by installer
-if [ -f $GPHOME/greenplum_path.sh ]; then
-    source $GPHOME/greenplum_path.sh
-fi
-export MASTER_HOST=$GPDB_COORDINATOR_HOST
-export COORDINATOR_DATA_DIRECTORY=$GPDB_DATA_DIR/master/gpseg-1
-export PGPORT=5432
-export PGUSER=gpadmin
-export PGDATABASE=tdi
-"
-    
     for host in "${hosts[@]}"; do
         log_info_with_timestamp "Configuring environment on $host..."
         
-        # Create environment setup script to prevent duplicates
-        local env_script="
-        # Check if Greenplum environment is already configured
-        if ! grep -q 'Greenplum Environment Setup' /home/gpadmin/.bash_profile 2>/dev/null; then
-            echo 'Adding Greenplum environment to .bash_profile...'
-            echo '$env_setup' >> /home/gpadmin/.bash_profile
-        else
-            echo 'Greenplum environment already configured in .bash_profile'
-        fi
+        # Create a temporary script file to avoid quoting issues
+        local temp_script="/tmp/setup_gp_env_$$.sh"
+        cat > "$temp_script" << 'EOF'
+#!/bin/bash
+
+# Add Greenplum environment to .bashrc if not already present
+if ! grep -q "Greenplum Environment Setup" /home/gpadmin/.bashrc 2>/dev/null; then
+    cat >> /home/gpadmin/.bashrc << 'GPENV_EOF'
+
+# Greenplum Environment Setup - Auto-generated by installer
+source /usr/local/greenplum-db-7.5.2/greenplum_path.sh
+export COORDINATOR_DATA_DIRECTORY=/home/gpdata/coordinator/gpseg-1
+export PGPORT=5432
+export PGUSER=gpadmin
+export PGDATABASE=tdi
+export LD_PRELOAD=/lib64/libz.so.1 ps
+GPENV_EOF
+    echo "Greenplum environment added to .bashrc"
+else
+    echo "Greenplum environment already configured in .bashrc"
+fi
+
+# Add to .bash_profile as well  
+if ! grep -q "Greenplum Environment Setup" /home/gpadmin/.bash_profile 2>/dev/null; then
+    cat >> /home/gpadmin/.bash_profile << 'GPENV_EOF'
+
+# Greenplum Environment Setup - Auto-generated by installer
+source /usr/local/greenplum-db-7.5.2/greenplum_path.sh
+export COORDINATOR_DATA_DIRECTORY=/home/gpdata/coordinator/gpseg-1
+export PGPORT=5432
+export PGUSER=gpadmin
+export PGDATABASE=tdi
+export LD_PRELOAD=/lib64/libz.so.1 ps
+GPENV_EOF
+    echo "Greenplum environment added to .bash_profile"
+else
+    echo "Greenplum environment already configured in .bash_profile"
+fi
+
+chown gpadmin:gpadmin /home/gpadmin/.bash_profile /home/gpadmin/.bashrc
+EOF
         
-        # Also update .bashrc for interactive shell compatibility
-        if ! grep -q 'Greenplum Environment Setup' /home/gpadmin/.bashrc 2>/dev/null; then
-            echo 'Adding Greenplum environment to .bashrc...'
-            echo '$env_setup' >> /home/gpadmin/.bashrc
-        else
-            echo 'Greenplum environment already configured in .bashrc'
-        fi
+        # Copy script to host and execute
+        ssh_copy_file "$temp_script" "$host" "/tmp/"
+        ssh_execute "$host" "sudo bash /tmp/$(basename $temp_script) && rm -f /tmp/$(basename $temp_script)"
         
-        # Ensure proper ownership
-        chown gpadmin:gpadmin /home/gpadmin/.bash_profile /home/gpadmin/.bashrc 2>/dev/null || true
-        "
-        
-        ssh_execute "$host" "sudo -u gpadmin bash -c \"$env_script\""
+        # Clean up local temp script
+        rm -f "$temp_script"
     done
 }
 
@@ -380,11 +498,11 @@ configure_pg_hba() {
     
     log_info "Configuring pg_hba.conf on coordinator..."
     
-    # Find the actual master directory (it could be gpseg-1, sdw-1, etc.)
+    # Find the actual coordinator directory (it could be gpseg-1, etc.)
     local master_dir_script="
-    find $GPDB_DATA_DIR/master -name 'pg_hba.conf' -type f | head -n1 | xargs dirname
+    find $COORDINATOR_DATA_DIR -name 'pg_hba.conf' -type f | head -n1 | xargs dirname
     "
-    local master_dir=$(ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c \"$master_dir_script\"" | tr -d '\r\n')
+    local master_dir=$(ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c \"$master_dir_script\"" "" "true" | tr -d '\r\n')
     
     if [ -z "$master_dir" ]; then
         log_error "Could not locate master data directory"
@@ -414,7 +532,7 @@ host    replication     gpadmin         ::1/128                 trust"
     # Add entries for all cluster hosts
     for host in "${hosts[@]}"; do
         # Resolve hostname to IP if possible
-        local host_ip=$(ssh_execute "$coordinator_host" "getent hosts $host | awk '{print \$1}' | head -n1" 2>/dev/null || echo "$host")
+        local host_ip=$(ssh_execute "$coordinator_host" "getent hosts $host | awk '{print \$1}' | head -n1" "" "true" 2>/dev/null || echo "$host")
         
         pg_hba_entries="$pg_hba_entries
 # Connections from $host
@@ -428,14 +546,27 @@ host    all             all             $host/32                md5"
         fi
     done
     
+    # Add entries for allowed client subnets
+    if [ ${#GPDB_ALLOWED_CLIENT_SUBNETS[@]} -gt 0 ]; then
+        pg_hba_entries="$pg_hba_entries
+
+# Allowed client connections from external subnets
+"
+        for subnet in "${GPDB_ALLOWED_CLIENT_SUBNETS[@]}"; do
+            pg_hba_entries="$pg_hba_entries
+host    all             all             $subnet             md5"
+        done
+    fi
+
     # Backup existing pg_hba.conf and update
     local update_script="
     if [ -f '$pg_hba_path' ]; then
-        echo 'Backing up original pg_hba.conf...'
-        cp '$pg_hba_path' '$pg_hba_path.backup.\$(date +%s)'
-        echo 'Adding Greenplum configuration entries...'
-        echo '$pg_hba_entries' >> '$pg_hba_path'
-        echo 'pg_hba.conf updated successfully'
+        echo 'Backing up original pg_hba.conf to $pg_hba_path.backup.installer...'
+        mv '$pg_hba_path' '$pg_hba_path.backup.installer'
+        echo 'Creating new pg_hba.conf with correct access rules...'
+        echo '$pg_hba_entries' > '$pg_hba_path'
+        chmod 600 '$pg_hba_path'
+        echo 'pg_hba.conf created successfully'
     else
         echo 'Error: pg_hba.conf not found at $pg_hba_path'
         exit 1
@@ -456,12 +587,19 @@ restart_greenplum_cluster() {
     
     log_info "Restarting Greenplum to apply configuration changes..."
     
-    local restart_command="cd /home/gpadmin && source $GPHOME/greenplum_path.sh && $GPHOME/bin/gpstop -ar && $GPHOME/bin/gpstart -a"
+    local restart_command="
+        cd /home/gpadmin
+        source ~/.bashrc
+        gpstop -ar
+        gpstart -a
+    "
     
     if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c '$restart_command'"; then
         log_success "Greenplum cluster restarted successfully"
     else
-        log_error "Failed to restart Greenplum cluster"
+        log_warn "Failed to restart Greenplum cluster after pg_hba.conf update"
+        log_info "Cluster was running successfully before restart - pg_hba.conf changes will take effect on next manual restart"
+        log_info "You can manually restart with: sudo -u gpadmin bash -c 'source ~/.bashrc && gpstop -a && gpstart -a'"
     fi
 }
 
@@ -471,7 +609,10 @@ test_greenplum_connectivity() {
     
     log_info "Testing Greenplum cluster connectivity..."
     
-    local test_command="cd /home/gpadmin && source $GPHOME/greenplum_path.sh && psql -d tdi -c 'SELECT version();'"
+    local test_command="
+        cd /home/gpadmin
+        source ~/.bashrc
+        psql -d tdi -c \"SELECT version();\""
     
     if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c '$test_command'"; then
         log_success "Greenplum cluster connectivity test passed"

@@ -8,7 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/validation.sh"
 
 # Default configuration values
 DEFAULT_INSTALL_DIR="/usr/local/greenplum-db"
-DEFAULT_DATA_DIR="/data/primary"
+DEFAULT_DATA_ROOT="/data"
 DEFAULT_CONFIG_FILE="gpdb_config.conf"
 
 # Function to load configuration from file
@@ -18,6 +18,20 @@ load_configuration() {
     if [ -f "$config_file" ]; then
         log_info "Loading configuration from '$config_file'..."
         source "$config_file"
+        
+        # Explicitly export configuration variables
+        export GPDB_COORDINATOR_HOST
+        export GPDB_STANDBY_HOST  
+        export GPDB_SEGMENT_HOSTS
+        export GPDB_INSTALL_DIR
+        export GPDB_DATA_ROOT
+        export GPADMIN_PASSWORD
+        
+        # Derive specific directory paths from root
+        export COORDINATOR_DATA_DIR="$GPDB_DATA_ROOT/coordinator"
+        export SEGMENT_DATA_DIR="$GPDB_DATA_ROOT/primary"
+        export MIRROR_DATA_DIR="$GPDB_DATA_ROOT/mirror"
+        
         validate_configuration
         log_success "Configuration loaded successfully"
         return 0
@@ -42,7 +56,10 @@ GPDB_COORDINATOR_HOST="$GPDB_COORDINATOR_HOST"
 GPDB_STANDBY_HOST="$GPDB_STANDBY_HOST"
 GPDB_SEGMENT_HOSTS=($(echo "${GPDB_SEGMENT_HOSTS[@]}" | tr ' ' ' '))
 GPDB_INSTALL_DIR="$GPDB_INSTALL_DIR"
-GPDB_DATA_DIR="$GPDB_DATA_DIR"
+GPDB_DATA_ROOT="$GPDB_DATA_ROOT"
+
+# Security credentials (stored securely)
+GPADMIN_PASSWORD="$GPADMIN_PASSWORD"
 EOL
     
     log_success "Configuration saved to '$config_file'"
@@ -96,10 +113,28 @@ prompt_for_configuration() {
     GPDB_INSTALL_DIR=${input_install_dir:-$DEFAULT_INSTALL_DIR}
     validate_directory_path "$GPDB_INSTALL_DIR" "installation"
     
-    # Data directory
-    read -p "Enter the primary data directory [$DEFAULT_DATA_DIR]: " input_data_dir
-    GPDB_DATA_DIR=${input_data_dir:-$DEFAULT_DATA_DIR}
-    validate_directory_path "$GPDB_DATA_DIR" "data"
+    # Data root directory
+    read -p "Enter the data root directory [$DEFAULT_DATA_ROOT]: " input_data_root
+    GPDB_DATA_ROOT=${input_data_root:-$DEFAULT_DATA_ROOT}
+    validate_directory_path "$GPDB_DATA_ROOT" "data root"
+    
+    log_info "Directory structure will be:"
+    log_info "  Coordinator data: $GPDB_DATA_ROOT/coordinator"
+    log_info "  Primary segments: $GPDB_DATA_ROOT/primary"
+    log_info "  Mirror segments:  $GPDB_DATA_ROOT/mirror"
+    
+    # Gpadmin password
+    echo ""
+    log_info "The installer will create a 'gpadmin' user for Greenplum administration."
+    read -s -p "Enter password for gpadmin user: " GPADMIN_PASSWORD
+    echo ""
+    if [ -z "$GPADMIN_PASSWORD" ]; then
+        log_error "Gpadmin password cannot be empty"
+        return 1
+    fi
+    
+    # Validate password strength
+    validate_password "$GPADMIN_PASSWORD" "gpadmin"
     
     # Validate complete configuration
     validate_configuration
@@ -116,7 +151,11 @@ show_configuration() {
     echo "Segment Hosts: ${GPDB_SEGMENT_HOSTS[*]}"
     echo "Standby Host: ${GPDB_STANDBY_HOST:-None}"
     echo "Install Directory: $GPDB_INSTALL_DIR"
-    echo "Data Directory: $GPDB_DATA_DIR"
+    echo "Data Root Directory: $GPDB_DATA_ROOT"
+    echo "  └─ Coordinator: $GPDB_DATA_ROOT/coordinator"
+    echo "  └─ Segments: $GPDB_DATA_ROOT/primary"
+    echo "  └─ Mirrors: $GPDB_DATA_ROOT/mirror"
+    echo "Gpadmin Password: ${GPADMIN_PASSWORD:+[Configured]}"
     echo "====================="
     echo ""
 }
@@ -124,6 +163,7 @@ show_configuration() {
 # Function to configure installation interactively
 configure_installation() {
     local config_file="${1:-$DEFAULT_CONFIG_FILE}"
+    local template_file="${config_file}.template"
     
     log_info "Starting configuration..."
     
@@ -139,6 +179,39 @@ configure_installation() {
         if [[ "$use_existing" =~ ^[Yy]$ ]]; then
             log_success "Using existing configuration"
             return 0
+        fi
+    else
+        # Check if template exists and offer to copy it
+        if [ -f "$template_file" ]; then
+            log_info "Configuration template found: $template_file"
+            echo ""
+            log_info "Options:"
+            echo "  1. Copy template and customize interactively"
+            echo "  2. Copy template as-is (edit manually later)"
+            echo "  3. Create new configuration interactively"
+            echo ""
+            read -p "Choose option (1-3) [1]: " template_option
+            template_option=${template_option:-1}
+            
+            case "$template_option" in
+                1)
+                    log_info "Copying template and starting interactive configuration..."
+                    cp "$template_file" "$config_file"
+                    ;;
+                2)
+                    log_info "Copying template as-is..."
+                    cp "$template_file" "$config_file"
+                    log_success "Configuration template copied to '$config_file'"
+                    log_info "Please edit '$config_file' with your actual values and re-run the installer"
+                    return 1
+                    ;;
+                3)
+                    log_info "Creating new configuration interactively..."
+                    ;;
+                *)
+                    log_warn "Invalid option. Creating new configuration interactively..."
+                    ;;
+            esac
         fi
     fi
     
@@ -192,7 +265,7 @@ validate_configuration_completeness() {
     [ -z "$GPDB_COORDINATOR_HOST" ] && errors+=("Coordinator host not set")
     [ ${#GPDB_SEGMENT_HOSTS[@]} -eq 0 ] && errors+=("No segment hosts defined")
     [ -z "$GPDB_INSTALL_DIR" ] && errors+=("Install directory not set")
-    [ -z "$GPDB_DATA_DIR" ] && errors+=("Data directory not set")
+    [ -z "$GPDB_DATA_ROOT" ] && errors+=("Data root directory not set")
     
     if [ ${#errors[@]} -gt 0 ]; then
         log_error "Configuration validation failed: ${errors[*]}"
@@ -217,5 +290,5 @@ reset_configuration() {
     GPDB_STANDBY_HOST=""
     GPDB_SEGMENT_HOSTS=()
     GPDB_INSTALL_DIR="$DEFAULT_INSTALL_DIR"
-    GPDB_DATA_DIR="$DEFAULT_DATA_DIR"
+    GPDB_DATA_ROOT="$DEFAULT_DATA_ROOT"
 }
