@@ -8,14 +8,65 @@ source "$(dirname "${BASH_SOURCE[0]}")/validation.sh"
 
 # SSH connection reuse settings
 SSH_CONTROL_PATH="/tmp/ssh_mux_%h_%p_%r"
-SSH_CONTROL_PERSIST="10m"
+SSH_CONTROL_PERSIST="30m"  # Increased from 10m to 30m
 SSH_TIMEOUT=30
 
 # Global array to track established SSH connections
 declare -a ESTABLISHED_SSH_HOSTS=()
 
+# Function to refresh SSH connections if they're lost
+refresh_ssh_connections() {
+    local hosts=("$@")
+    
+    log_info "Refreshing SSH connections to ensure they're still active..."
+    
+    for host in "${hosts[@]}"; do
+        # Check if connection is still alive
+        if ! ssh -o ControlPath="$SSH_CONTROL_PATH" -O check "$host" 2>/dev/null; then
+            log_warn "SSH connection to $host appears lost, re-establishing..."
+            # Try to re-establish the connection
+            establish_ssh_connection "$host"
+        fi
+    done
+}
+
+# Function to install sshpass if not available
+install_sshpass() {
+    log_info "Attempting to install sshpass..."
+    
+    # Try different package managers
+    if command -v yum >/dev/null 2>&1; then
+        if sudo yum install -y sshpass 2>/dev/null; then
+            log_success "sshpass installed via yum"
+            return 0
+        fi
+    elif command -v dnf >/dev/null 2>&1; then
+        if sudo dnf install -y sshpass 2>/dev/null; then
+            log_success "sshpass installed via dnf"
+            return 0
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        if sudo apt-get update && sudo apt-get install -y sshpass 2>/dev/null; then
+            log_success "sshpass installed via apt-get"
+            return 0
+        fi
+    elif command -v brew >/dev/null 2>&1; then
+        if brew install sshpass 2>/dev/null; then
+            log_success "sshpass installed via brew"
+            return 0
+        fi
+    fi
+    
+    log_warn "Could not install sshpass automatically. Please install it manually:"
+    log_info "  RHEL/CentOS: sudo yum install sshpass"
+    log_info "  Ubuntu/Debian: sudo apt-get install sshpass"
+    log_info "  macOS: brew install sshpass"
+    return 1
+}
+
 # Function to build SSH command with multiplexing options
 build_ssh_cmd() {
+    local user="${1:-root}"  # Default to root user for Greenplum installation
     local ssh_cmd="ssh"
     ssh_cmd="$ssh_cmd -o StrictHostKeyChecking=no"
     ssh_cmd="$ssh_cmd -o UserKnownHostsFile=/dev/null"
@@ -25,6 +76,7 @@ build_ssh_cmd() {
     ssh_cmd="$ssh_cmd -o ControlMaster=auto"
     ssh_cmd="$ssh_cmd -o ControlPath=$SSH_CONTROL_PATH"
     ssh_cmd="$ssh_cmd -o ControlPersist=$SSH_CONTROL_PERSIST"
+    ssh_cmd="$ssh_cmd -l $user"
     echo "$ssh_cmd"
 }
 
@@ -35,12 +87,12 @@ establish_ssh_connection() {
     log_info "Establishing SSH master connection to $host..."
     
     # Clean up any existing socket for this host first
-    local socket_path=$(echo "$SSH_CONTROL_PATH" | sed "s/%h/$host/g" | sed "s/%p/22/g" | sed "s/%r/${USER:-$LOGNAME}/g")
+    local socket_path=$(echo "$SSH_CONTROL_PATH" | sed "s/%h/$host/g" | sed "s/%p/22/g" | sed "s/%r/root/g")
     
     # Check if connection already exists and is working
     if [ -S "$socket_path" ]; then
         log_info "Existing SSH control socket found for $host, testing connection..."
-        if ssh -o ControlPath="$SSH_CONTROL_PATH" -O check "$host" 2>/dev/null; then
+        if ssh -o ControlPath="$SSH_CONTROL_PATH" -l root -O check "$host" 2>/dev/null; then
             log_success "Existing SSH master connection to $host is working"
             # Make sure it's in our tracking array
             if ! [[ " ${ESTABLISHED_SSH_HOSTS[*]} " =~ " $host " ]]; then
@@ -50,7 +102,7 @@ establish_ssh_connection() {
         else
             log_info "Existing connection not working, cleaning up..."
             # Try to cleanly close existing connection
-            ssh -o ControlPath="$SSH_CONTROL_PATH" -O exit "$host" 2>/dev/null || true
+            ssh -o ControlPath="$SSH_CONTROL_PATH" -l root -O exit "$host" 2>/dev/null || true
             sleep 1
         fi
     fi
@@ -66,12 +118,14 @@ establish_ssh_connection() {
     master_ssh_cmd="$master_ssh_cmd -o ControlMaster=yes"
     master_ssh_cmd="$master_ssh_cmd -o ControlPath=$SSH_CONTROL_PATH"
     master_ssh_cmd="$master_ssh_cmd -o ControlPersist=$SSH_CONTROL_PERSIST"
+    master_ssh_cmd="$master_ssh_cmd -l root"
     
     # Create persistent SSH connection 
     if [ -n "$SSH_PASSWORD" ]; then
         log_info "Creating master SSH connection using stored password..."
-        # Use sshpass if password is available
+        # Check if sshpass is available
         if command -v sshpass >/dev/null 2>&1; then
+            log_info "Using sshpass for automated password authentication"
             if sshpass -e $master_ssh_cmd -N -f "$host"; then
                 log_info "SSH master connection established using stored password"
                 # Brief pause to ensure connection is established
@@ -90,7 +144,17 @@ establish_ssh_connection() {
                 log_warn "Failed to establish master connection to $host using stored password. Will prompt for password."
             fi
         else
-            log_warn "sshpass not available. Will prompt for password."
+            log_warn "sshpass not available. Installing sshpass for automated password authentication..."
+            # Try to install sshpass
+            if install_sshpass; then
+                log_info "sshpass installed successfully. Retrying connection..."
+                if sshpass -e $master_ssh_cmd -N -f "$host"; then
+                    log_success "SSH master connection established using stored password"
+                    ESTABLISHED_SSH_HOSTS+=("$host")
+                    return 0
+                fi
+            fi
+            log_warn "Will prompt for password manually for this connection"
         fi
     fi
     
@@ -253,10 +317,16 @@ cleanup_remote_ssh_connections() {
 ssh_execute() {
     local host="$1"
     local command="$2"
-    local timeout="${3:-$SSH_TIMEOUT}"
+    local timeout="${3}"
     local silent="${4:-false}"
+    local user="${5:-root}"  # Default to root user for Greenplum installation
     
-    local ssh_cmd=$(build_ssh_cmd)
+    # Handle empty timeout parameter properly
+    if [ -z "$timeout" ]; then
+        timeout="$SSH_TIMEOUT"
+    fi
+    
+    local ssh_cmd=$(build_ssh_cmd "$user")
     # Override timeout if specified
     if [ "$timeout" != "$SSH_TIMEOUT" ]; then
         ssh_cmd=$(echo "$ssh_cmd" | sed "s/ConnectTimeout=$SSH_TIMEOUT/ConnectTimeout=$timeout/")
@@ -264,11 +334,11 @@ ssh_execute() {
     
     # Add some debug info (only if not in silent mode)
     if [ "$silent" != "true" ] && [[ "$command" != *"echo 'Connection test successful'"* ]]; then
-        local socket_path=$(echo "$SSH_CONTROL_PATH" | sed "s/%h/$host/g" | sed "s/%p/22/g" | sed "s/%r/${USER:-$LOGNAME}/g")
+        local socket_path=$(echo "$SSH_CONTROL_PATH" | sed "s/%h/$host/g" | sed "s/%p/22/g" | sed "s/%r/$user/g")
         if [ -S "$socket_path" ]; then
             # Double-check that the connection is actually working
-            if ssh -o ControlPath="$SSH_CONTROL_PATH" -O check "$host" 2>/dev/null; then
-                log_info "Using SSH master connection for $host"
+            if ssh -o ControlPath="$SSH_CONTROL_PATH" -l "$user" -O check "$host" 2>/dev/null; then
+                log_info "Using SSH master connection for $host (user: $user)"
             else
                 log_warn "SSH master connection socket exists but not working for $host - may prompt for password"
             fi
@@ -285,6 +355,7 @@ ssh_copy_file() {
     local source_file="$1"
     local host="$2"
     local dest_path="$3"
+    local user="${4:-root}"  # Default to root user for Greenplum installation
     
     # Build SCP command with same options as SSH
     local scp_cmd="scp"
@@ -295,7 +366,7 @@ ssh_copy_file() {
     scp_cmd="$scp_cmd -o ControlPath=$SSH_CONTROL_PATH"
     scp_cmd="$scp_cmd -o ControlPersist=$SSH_CONTROL_PERSIST"
     
-    $scp_cmd "$source_file" "$host:$dest_path"
+    $scp_cmd "$source_file" "$user@$host:$dest_path"
 }
 
 # Function to generate SSH key for user

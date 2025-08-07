@@ -30,6 +30,11 @@ GPDB_DATA_ROOT="/home/gpdata"
 # Security credentials (will be encrypted/secured)
 GPADMIN_PASSWORD="your-secure-gpadmin-password-here"
 
+# PXF (Platform Extension Framework) Configuration
+# Set to "true" to install PXF automatically, "false" to skip
+# If not set, installer will auto-detect based on presence of PXF RPM in files/ directory
+INSTALL_PXF="true"
+
 # Example configurations:
 #
 # Single Node Setup:

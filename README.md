@@ -1,361 +1,466 @@
-# Tanzu Greenplum Database & OpenMetadata Installer
+# 🚀 Enterprise Database & Data Platform Installer Suite
 
-A comprehensive automation suite for installing Greenplum Database v7 and OpenMetadata v1.8.0 on Linux servers with support for single-node and multi-node cluster configurations, Docker-based deployments, and enhanced management capabilities.
+<div align="center">
 
-## Features
+![Version](https://img.shields.io/badge/version-2.0-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Platform](https://img.shields.io/badge/platform-Linux-orange.svg)
+![Shell](https://img.shields.io/badge/shell-bash-lightgrey.svg)
 
-### Greenplum Database Installer
-- **Flexible Deployment**: Support for single-node and multi-node cluster configurations
-- **Standby Coordinator**: Optional standby coordinator setup for high availability
-- **Automated Setup**: Complete automation of user creation, SSH configuration, and cluster initialization
-- **Error Handling**: Comprehensive error checking and informative error messages
-- **Dry Run Mode**: Test the installation process without making changes
-- **Configuration Persistence**: Save and reuse configuration settings
-- **Red Hat Linux Compatible**: Optimized for RHEL/CentOS/Rocky Linux systems
-- **Remote Deployment**: Push scripts to remote servers via SSH
-- **GitHub Integration**: Create releases and upload packages automatically
+**A comprehensive automation suite for deploying enterprise-grade data platforms**
 
-### OpenMetadata Installer
-- **Docker-Based Installation**: Automated Docker and Docker Compose installation
-- **Flexible Configuration**: Comprehensive configuration options via `openmetadata_config.conf` template file for services like ingestion.
-- **Multi-OS Support**: Compatible with RHEL/CentOS/Rocky Linux and Ubuntu/Debian
-- **Automated Setup**: Complete automation of Docker installation, service configuration, and initialization
-- **Service Management**: Built-in scripts for starting, stopping, and monitoring services
-- **Full Lifecycle Management**: Includes `--clean` for reinstallation, and `--remove` for complete uninstallation.
-- **Configurable Host**: Use `--host` to override the target server from the config file.
-- **Comprehensive Output**: Detailed completion summary with URLs, ports, admin credentials, and management commands.
+[🔧 Quick Start](#-quick-start) • [📖 Documentation](#-documentation) • [🏗️ Architecture](#-architecture) • [🛠️ Troubleshooting](#-troubleshooting)
 
-## Prerequisites
+</div>
 
-### System Requirements
-- **Operating System**: CentOS 7/8/9, RHEL 7/8/9, or Rocky Linux 7/8/9
-- **Architecture**: x86_64
-- **Memory**: Minimum 8GB RAM (16GB recommended)
-- **Disk Space**: At least 10GB free space for installation
+---
 
-### Software Dependencies
-- `sshpass` - For automated SSH key distribution (will be installed automatically if missing)
-- `sudo` - For privileged operations
-- `ssh` - For remote host communication
-- `rpm` - For package installation
+## 🌟 Overview
 
-**Greenplum Dependencies** (installed automatically):
-- `apr` and `apr-util` - Apache Portable Runtime
-- `krb5-devel` - Kerberos development libraries
-- `libevent-devel` - Event notification library
-- `perl` - Perl programming language
-- `python3-psycopg2` - PostgreSQL adapter for Python
-- `python3.11` - Python 3.11 runtime
-- `readline-devel` - Readline development libraries
+This installer suite provides **production-ready automation** for deploying complex data platforms on Linux servers. Built with enterprise reliability in mind, it supports single-node and multi-node cluster configurations with comprehensive error handling and recovery capabilities.
 
-### Network Requirements
-- All hosts must be able to communicate via SSH
-- Passwordless SSH will be configured automatically
-- For single-node installations, SSH is configured for localhost access
-- For multi-node installations, SSH keys are distributed across all hosts
-- Port 5432 (PostgreSQL) must be available on the coordinator
+### 🎯 Supported Platforms
 
-## Installation
+| Platform | Version | Description | Status |
+|----------|---------|-------------|--------|
+| 🐘 **Greenplum Database** | 7.5.2 | Massively parallel PostgreSQL-based analytics database | ✅ Production Ready |
+| 🔍 **OpenMetadata** | 1.8.0+ | Unified metadata platform for data discovery & governance | ✅ Production Ready |
+| 🏗️ **Tanzu Data Lake Controller** | 2.0 | VMware data lake management and orchestration | ✅ Production Ready |
 
-### 1. Prepare Installation Files
+---
 
-Create the `files` directory and place your Greenplum installer:
+## 🏗️ Architecture
 
-```bash
-mkdir -p files
-# Copy your Greenplum installer to the files directory
-# Example: greenplum-db-7.0.0-el7-x86_64.rpm
+```mermaid
+graph TB
+    subgraph "🎯 Main Installers"
+        GP[🐘 gpdb_installer.sh<br/>Greenplum Database]
+        OM[🔍 openmetadata_installer.sh<br/>OpenMetadata Platform]
+        DL[🏗️ datalake_installer.sh<br/>Data Lake Controller]
+    end
+    
+    subgraph "📚 Library Modules"
+        CONFIG[⚙️ config.sh<br/>Configuration Management]
+        SSH[🔐 ssh.sh<br/>Secure Communications]
+        LOG[📝 logging.sh<br/>Structured Logging]
+        VALID[✅ validation.sh<br/>Pre-flight Checks]
+        SYS[🖥️ system.sh<br/>OS Operations]
+        GPLIB[🐘 greenplum.sh<br/>GP-specific Functions]
+        PXF[🔌 pxf.sh<br/>PXF Integration]
+        ERR[🚨 error_handling.sh<br/>Fault Management]
+    end
+    
+    subgraph "🛠️ Build Tools"
+        UTILS[scripts/utils/<br/>⚡ Build & Release Tools]
+    end
+    
+    subgraph "📋 Configuration"
+        GPCONF[gpdb_config.conf.template<br/>🐘 Greenplum Config]
+        OMCONF[openmetadata_config.conf.template<br/>🔍 OpenMetadata Config]
+        DLCONF[datalake_config.conf.template<br/>🏗️ Data Lake Config]
+    end
+    
+    GP --> CONFIG
+    GP --> SSH
+    GP --> LOG
+    GP --> GPLIB
+    GP --> PXF
+    
+    OM --> CONFIG
+    OM --> SSH
+    OM --> LOG
+    
+    DL --> CONFIG
+    DL --> SSH
+    DL --> LOG
+    
+    CONFIG --> VALID
+    CONFIG --> SYS
+    CONFIG --> ERR
+    
+    GP -.-> GPCONF
+    OM -.-> OMCONF
+    DL -.-> DLCONF
+    
+    style GP fill:#e1f5fe
+    style OM fill:#f3e5f5
+    style DL fill:#e8f5e8
+    style CONFIG fill:#fff3e0
+    style SSH fill:#ffebee
+    style LOG fill:#f1f8e9
 ```
 
-### 2. Test Red Hat Compatibility (Optional)
+---
 
+## 🚀 Quick Start
+
+### 📋 Prerequisites
+
+| Requirement | Details |
+|-------------|---------|
+| 🖥️ **Operating System** | RHEL/CentOS/Rocky Linux 7/8/9 |
+| 👤 **User Access** | Root or sudo privileges |
+| 🌐 **Network** | SSH access to all target hosts |
+| 💾 **Storage** | Minimum 10GB free space |
+| 🧠 **Memory** | 4GB+ RAM (8GB+ recommended) |
+
+### ⚡ Installation Commands
+
+#### 🐘 Greenplum Database
 ```bash
-# Test compatibility with Red Hat Linux systems
-./test_redhat_compatibility.sh
-```
+# 1. Configure your cluster
+cp gpdb_config.conf.template gpdb_config.conf
+vim gpdb_config.conf
 
-### 3. Run the Greenplum Installer
-
-```bash
-# Make the script executable
-chmod +x gpdb_installer.sh
-
-# Run the installer
+# 2. Deploy Greenplum + PXF
 ./gpdb_installer.sh
 
-# Or run in dry-run mode to test
+# 3. Optional: Test installation
 ./gpdb_installer.sh --dry-run
 ```
 
-### 4. Run the OpenMetadata Installer
-
+#### 🔍 OpenMetadata Platform
 ```bash
-# Make the script executable
-chmod +x openmetadata_installer.sh
+# 1. Configure deployment
+cp openmetadata_config.conf.template openmetadata_config.conf
+vim openmetadata_config.conf
 
-# Run the installer for full installation
+# 2. Deploy OpenMetadata
 ./openmetadata_installer.sh
 
-# Run in dry-run mode to test
-./openmetadata_installer.sh --dry-run
-
-# Clean up and reinstall OpenMetadata
-./openmetadata_installer.sh --clean
-
-# Completely remove OpenMetadata installation
-./openmetadata_installer.sh --remove
-
-# Install to a specific host, overriding the config file
-./openmetadata_installer.sh --host user@your-remote-host
+# 3. Access UI at http://your-server:8585
+# Default login: admin@open-metadata.org / admin
 ```
 
-### 5. Configuration
-
-The installer will prompt you for the following information:
-
-- **Coordinator Hostname**: The host that will serve as the coordinator (default: current hostname)
-- **Segment Hosts**: Comma-separated list of hosts for data segments
-- **Standby Coordinator**: Optional standby coordinator for high availability
-- **Installation Directory**: Where to install Greenplum (default: `/usr/local/greenplum-db`)
-- **Data Directory**: Where to store data files (default: `/data/primary`)
-
-## Usage Examples
-
-### Single-Node Installation
+#### 🏗️ Data Lake Controller
 ```bash
-./gpdb_installer.sh
-# Accept defaults for single-node setup
+# 1. Configure controller
+cp datalake_config.conf.template datalake_config.conf
+vim datalake_config.conf
+
+# 2. Deploy controller
+./datalake_installer.sh
 ```
 
-### Multi-Node Installation
+---
+
+## 🎛️ Advanced Features
+
+### 🔄 Lifecycle Management
+
+| Operation | Greenplum | OpenMetadata | Data Lake |
+|-----------|-----------|--------------|-----------|
+| **Install** | `./gpdb_installer.sh` | `./openmetadata_installer.sh` | `./datalake_installer.sh` |
+| **Dry Run** | `--dry-run` | `--dry-run` | `--dry-run` |
+| **Clean Install** | `--force` | `--clean` | `--clean` |
+| **Uninstall** | `--clean` | `--remove` | `--clean` |
+| **Custom Config** | `--config custom.conf` | `--config custom.conf` | `--config custom.conf` |
+
+### 🔧 Configuration Templates
+
+<details>
+<summary>🐘 <strong>Greenplum Configuration</strong></summary>
+
 ```bash
-./gpdb_installer.sh
-# Enter segment hostnames: sdw1,sdw2,sdw3
-# Enter standby hostname: sdw4
+# Core cluster settings
+GPDB_COORDINATOR_HOST="gp-coordinator.example.com"
+GPDB_SEGMENT_HOSTS=("gp-seg1.example.com" "gp-seg2.example.com")
+GPDB_STANDBY_HOST="gp-standby.example.com"  # Optional
+
+# User credentials
+SSH_USER="gpadmin"
+SUDO_PASSWORD="your_sudo_password"
+
+# Installation options
+INSTALL_PXF=true
+CREATE_SAMPLE_DATABASE=true
+DATABASE_NAME="analytics"
 ```
+</details>
 
-### Dry Run (Testing)
-```bash
-./gpdb_installer.sh --dry-run
-```
-
-## Remote Deployment
-
-You can deploy the installer package to a single remote server (typically the coordinator or primary node) using `push_to_server.sh`. Once deployed, SSH into that server and run the installer, which will handle installation and configuration across all cluster nodes.
-
-**Example: Deploy to a single server**
-```bash
-./push_to_server.sh user@coordinator.example.com
-```
-
-**Example: Deploy with custom SSH key and target directory**
-```bash
-./push_to_server.sh --key-file ~/.ssh/id_rsa --target-dir /opt/gpdb_installer user@coordinator.example.com
-```
-
-> **Note:** You only need to push the installer to one server. The installer will distribute binaries and configuration to all cluster nodes from there.
-
-**To install:**
-```bash
-ssh user@coordinator.example.com
-cd /opt/gpdb_installer
-./gpdb_installer.sh
-```
-
-### Package Creation and GitHub Release
-
-Create a distribution package and optionally create a GitHub release:
+<details>
+<summary>🔍 <strong>OpenMetadata Configuration</strong></summary>
 
 ```bash
-# Create package only
-./package.sh
+# Target deployment
+REMOTE_HOST="metadata.example.com"
+REMOTE_USER="ubuntu"
 
-# Create package and GitHub release
-./package.sh --release
-```
+# Service configuration
+OPENMETADATA_VERSION="latest"
+OPENMETADATA_INGESTION_PORT=8082
 
-## Red Hat Linux Compatibility
-
-The installer has been optimized for Red Hat Linux systems (RHEL, CentOS, Rocky Linux):
-
-- **Memory Detection**: Uses `/proc/meminfo` instead of `free` command
-- **Disk Space**: Uses `df -k` for better compatibility
-- **Hostname**: Uses standard `hostname` command
-- **Package Management**: Optimized for RPM-based systems
-- **System Commands**: Compatible with Red Hat system utilities
-
-Run the compatibility test to verify your system:
-
-```bash
-./test_redhat_compatibility.sh
-```
-
-## Scripts Overview
-
-The installer includes several scripts for different purposes:
-
-- **gpdb_installer.sh**: Main Greenplum installation script
-- **openmetadata_installer.sh**: Main OpenMetadata installation and management script
-- **cleanup_greenplum.sh**: Script to clean up a Greenplum installation
-- **datalake_installer.sh**: Script for Datalake installation (if applicable)
-- **test_installer.sh**: Automated testing script for Greenplum
-- **dry_run_test.sh**: Comprehensive dry-run testing for Greenplum
-- **interactive_test.sh**: Interactive testing mode for Greenplum
-- **package.sh**: Package creation and GitHub release script
-- **push_to_server.sh**: Remote deployment script (used by gpdb_installer)
-- **test_redhat_compatibility.sh**: Red Hat Linux compatibility testing
-- **test_config.sh**: Test script for configuration parsing
-- **test_ssh.sh**: Test script for SSH connectivity
-- **test_validation.sh**: Test script for validation functions
-
-## Configuration File
-
-The installers use configuration files for customizable settings:
-
-- **gpdb_config.conf.template**: Template for Greenplum Database configuration
-- **openmetadata_config.conf.template**: Template for OpenMetadata installation configuration
-
-Example `gpdb_config.conf` configuration:
-
-```bash
-# Example configuration
-GPDB_COORDINATOR_HOST="coordinator.example.com"
-GPDB_STANDBY_HOST="standby.example.com"
-GPDB_SEGMENT_HOSTS=(sdw1 sdw2 sdw3)
-GPDB_INSTALL_DIR="/usr/local/greenplum-db"
-GPDB_DATA_DIR="/data/primary"
-```
-
-Example `openmetadata_config.conf` configuration:
-
-```bash
-# OpenMetadata service configuration
-OPENMETADATA_HOST="big-data-004.kuhn-labs.com" # Hostname or IP of the OpenMetadata server
-OPENMETADATA_VERSION="1.8.10-release" # OpenMetadata version to install
-
-# Docker configuration (true/false)
-INSTALL_DOCKER=true
-
-# Database configuration (OpenMetadata uses MySQL by default)
-# You can use existing MySQL/PostgreSQL or let OpenMetadata create its own
-OPENMETADATA_DB_TYPE="mysql"  # Options: mysql, postgresql
-OPENMETADATA_DB_HOST="localhost"
-OPENMETADATA_DB_PORT=3306
-OPENMETADATA_DB_NAME="openmetadata_db"
-OPENMETADATA_DB_USER="openmetadata_user"
-OPENMETADATA_DB_PASSWORD="your-secure-db-password-here"
-
-# OpenMetadata admin user configuration - default admin user (created automatically)
+# Admin credentials
 OPENMETADATA_ADMIN_USER="admin@open-metadata.org"
 OPENMETADATA_ADMIN_PASSWORD="admin"
 
-# OpenMetadata Ingestion/Airflow service configuration
-OPENMETADATA_INGESTION_PORT=8082 # Port for the Ingestion/Airflow service (e.g., 8082 to avoid conflict with 8080)
-
-# Storage configuration
+# Storage paths
 OPENMETADATA_DATA_DIR="/opt/openmetadata/data"
 OPENMETADATA_LOGS_DIR="/opt/openmetadata/logs"
+```
+</details>
 
-# SSH configuration for remote deployment
-OPENMETADATA_SSH_USER="root" # User for SSH connection to remote host
-SSH_KEY_FILE="" # Path to SSH private key file (optional)
+<details>
+<summary>🏗️ <strong>Data Lake Configuration</strong></summary>
+
+```bash
+# Controller deployment
+TDL_HOST="datalake.example.com"
+TDL_USER="tdl-admin"
+
+# Service settings
+TDL_CONTROLLER_PORT=8080
+TDL_API_PORT=8081
+
+# Storage configuration
+TDL_DATA_PATH="/opt/tdl/data"
+TDL_LOG_PATH="/opt/tdl/logs"
+```
+</details>
+
+---
+
+## 🧩 Component Integration
+
+### 🔌 PXF (Platform Extension Framework)
+
+The Greenplum installer includes **automatic PXF setup** with intelligent configuration management:
+
+- ✅ **Auto-detection** of Java environments
+- ✅ **Cluster registration** with Greenplum
+- ✅ **Extension installation** across all databases
+- ✅ **Configuration validation** and auto-repair
+- ✅ **HDFS/S3/JDBC connectivity** ready
+
+**PXF Configuration Fix Integration:**
+```bash
+# Automatically handles common PXF issues:
+# ❌ "pxf.pxf_base parameter cannot be empty"
+# ❌ Missing PXF extensions
+# ❌ Java environment issues
+# ✅ All fixed automatically during installation!
 ```
 
-## Post-Installation
+### 🐳 Docker Integration
 
-After successful installation:
+OpenMetadata installer provides **enterprise Docker management**:
 
-1. **Connect to the database**:
-   ```bash
-   sudo -u gpadmin bash -c 'source ~/.bashrc && psql -d tdi'
-   ```
+- 🔄 **Automatic Docker installation** (if missing)
+- 🔧 **Docker Compose orchestration** with official configurations
+- 📊 **Service health monitoring** and auto-recovery
+- 🔒 **Firewall configuration** for secure access
+- 📈 **Resource optimization** for production workloads
 
-2. **Verify cluster status**:
-   ```bash
-   sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'
-   ```
+---
 
-3. **Check segment status**:
-   ```bash
-   sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -e'
-   ```
+## 📊 Project Structure
 
-> **Note:** The installer configures the gpadmin user's `~/.bashrc` to source the Greenplum environment (`greenplum_path.sh`) and set required variables. Always use `source ~/.bashrc` in your session or scripts before running Greenplum commands as gpadmin.
+```
+📁 gpdb_installer/
+├── 🎯 Main Installers
+│   ├── 🐘 gpdb_installer.sh          # Greenplum Database installer
+│   ├── 🔍 openmetadata_installer.sh   # OpenMetadata platform installer
+│   └── 🏗️ datalake_installer.sh       # Data Lake Controller installer
+│
+├── 📚 Core Libraries (/lib)
+│   ├── ⚙️ config.sh                   # Configuration management
+│   ├── 🔐 ssh.sh                      # SSH operations & multiplexing
+│   ├── 📝 logging.sh                  # Structured logging system
+│   ├── ✅ validation.sh               # Pre-flight validation
+│   ├── 🖥️ system.sh                   # OS-specific operations
+│   ├── 🐘 greenplum.sh                # Greenplum-specific functions
+│   ├── 🔌 pxf.sh                      # PXF integration & fixes
+│   └── 🚨 error_handling.sh           # Error management & recovery
+│
+├── 🛠️ Build & Deployment (/scripts)
+│   └── utils/                         # Package creation & release tools
+│
+├── 📋 Configuration Templates
+│   ├── 🐘 gpdb_config.conf.template
+│   ├── 🔍 openmetadata_config.conf.template
+│   └── 🏗️ datalake_config.conf.template
+│
+├── 📖 Documentation (/docs)
+│   ├── 🏗️ ARCHITECTURE.md             # System architecture
+│   ├── 🛠️ TROUBLESHOOTING.md          # Issue resolution
+│   ├── 🧪 TESTING_SUMMARY.md          # Test procedures
+│   └── 📚 Additional guides...
+│
+└── 📦 Installation Assets (/files)
+    ├── 🐘 greenplum-db-*.rpm
+    ├── 🔌 pxf-gp7-*.rpm
+    └── 🏗️ tdl-controller-*.rpm
+```
 
-## Troubleshooting
+---
 
-### Common Issues
+## 🧪 Testing & Validation
 
-**SSH Connection Failed**
-- Ensure all hosts are reachable via SSH
-- Verify the gpadmin user exists on all hosts
-- Check that the provided password is correct
+### 🔍 Pre-flight Checks
 
-**Package Installation Failed**
-- Verify the Greenplum installer is in the `files` directory
-- Ensure the installer is compatible with your OS version
-- Check that rpm is available on all hosts
+All installers perform comprehensive validation:
 
-**Cluster Initialization Failed**
-- Verify all hosts can communicate with each other
-- Check that the data directories have proper permissions
-- Ensure the coordinator host is accessible from all segments
+| Check Category | Validation Items |
+|----------------|------------------|
+| 🖥️ **System Resources** | CPU, Memory, Disk Space, OS Version |
+| 🌐 **Network Connectivity** | SSH access, DNS resolution, Port availability |
+| 📦 **Dependencies** | Required packages, Java (for PXF), Docker (for OpenMetadata) |
+| 🔐 **Security** | User permissions, Firewall rules, SELinux status |
+| 📁 **File System** | Mount points, Permissions, Available space |
 
-**Permission Denied Errors**
-- Run the script with a user that has sudo privileges
-- Ensure the gpadmin user has proper permissions on data directories
+### 🧪 Test Suites
 
-### Logs and Debugging
+```bash
+# Run comprehensive tests
+./scripts/tests/run_all_tests.sh
 
-The installer provides detailed logging with color-coded output:
-- 🔵 **Blue**: Information messages
-- 🟢 **Green**: Success messages
-- 🟡 **Yellow**: Warning messages
-- 🔴 **Red**: Error messages
+# Individual test categories
+./scripts/tests/test_config.sh          # Configuration parsing
+./scripts/tests/test_ssh.sh             # SSH connectivity
+./scripts/tests/test_validation.sh      # System validation
+```
 
-### Manual Recovery
+---
 
-If the installation fails partway through:
+## 🛠️ Troubleshooting
 
-1. **Clean up partial installation**:
-   ```bash
-   # Remove gpadmin user and directories
-   sudo userdel -r gpadmin
-   sudo rm -rf /data/primary /usr/local/greenplum-db
-   ```
+### 🚨 Common Issues & Solutions
 
-2. **Restart the installer**:
-   ```bash
-   ./gpdb_installer.sh
-   ```
+<details>
+<summary>🔧 <strong>SSH Connection Issues</strong></summary>
 
-## Architecture
+**Problem:** Multiple password prompts or connection failures
+```bash
+# Solution: Enable SSH connection multiplexing (automatic in v2.0+)
+# Manual fix:
+ssh-keygen -t rsa -b 4096
+ssh-copy-id user@target-host
+```
+</details>
 
-The installers follow a phased approach:
+<details>
+<summary>🐘 <strong>Greenplum Cluster Issues</strong></summary>
 
-1.  **Preflight Checks**: OS compatibility, dependencies, privileges
-2.  **Host Setup**: User creation, directory setup, SSH configuration
-3.  **Binary Installation**: Package distribution and installation (for Greenplum), or Docker image deployment (for OpenMetadata)
-4.  **Cluster Initialization**: Database creation and configuration (for Greenplum), or service startup and configuration (for OpenMetadata)
+**Problem:** Segment initialization failures
+```bash
+# Check system resources
+./gpdb_installer.sh --dry-run
 
-## Security Considerations
+# Clean install
+./gpdb_installer.sh --clean
+./gpdb_installer.sh --force
+```
+</details>
 
-- The installer creates a `gpadmin` user with sudo privileges for Greenplum.
-- SSH keys are generated and distributed automatically for Greenplum.
-- Database passwords should be changed after installation.
-- Consider firewall rules for database and application ports.
+<details>
+<summary>🔌 <strong>PXF Configuration Issues</strong></summary>
 
-## Support
+**Problem:** "pxf.pxf_base parameter cannot be empty"
+```bash
+# ✅ Automatically fixed in v2.0+!
+# The installer now includes integrated PXF configuration validation
+# No manual intervention required
+```
+</details>
 
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review the installation logs for specific error messages
-3. Ensure all prerequisites are met
-4. Verify network connectivity between hosts
+<details>
+<summary>🔍 <strong>OpenMetadata Service Issues</strong></summary>
 
-## Version Compatibility
+**Problem:** Services won't start or UI inaccessible
+```bash
+# Check service status
+./openmetadata_installer.sh --dry-run
 
-This installer is designed for Greenplum Database v7. For other versions:
-- Modify the installer file detection patterns
-- Update the installation paths and commands
-- Adjust the configuration file format if needed 
+# Clean reinstall
+./openmetadata_installer.sh --clean
+./openmetadata_installer.sh
+```
+</details>
+
+### 📞 Getting Help
+
+| Resource | Location |
+|----------|----------|
+| 🏗️ **Architecture Guide** | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| 🛠️ **Troubleshooting** | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
+| 🧪 **Testing Guide** | [`docs/TESTING_SUMMARY.md`](docs/TESTING_SUMMARY.md) |
+| 👨‍💻 **Development** | [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) |
+
+---
+
+## 🚀 Advanced Usage
+
+### 🔄 CI/CD Integration
+
+```bash
+# Automated deployment pipeline
+./scripts/utils/package.sh --release    # Create GitHub release
+./gpdb_installer.sh --dry-run          # Validate configuration
+./gpdb_installer.sh                    # Deploy to production
+```
+
+### 🐳 Container Integration
+
+```bash
+# OpenMetadata with custom Docker settings
+export DOCKER_COMPOSE_PROFILES="ingestion,elasticsearch"
+./openmetadata_installer.sh --config production.conf
+```
+
+### 📊 Monitoring Integration
+
+```bash
+# Enable comprehensive logging
+export LOG_LEVEL=DEBUG
+export LOG_FILE="/var/log/installer.log"
+./gpdb_installer.sh
+```
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Development Guide](docs/DEVELOPER_GUIDE.md) for details.
+
+### 🔧 Development Setup
+
+```bash
+# Clone repository
+git clone https://github.com/your-org/gpdb_installer.git
+cd gpdb_installer
+
+# Run tests
+./scripts/tests/run_all_tests.sh
+
+# Create feature branch
+git checkout -b feature/your-feature
+```
+
+---
+
+## 📈 Roadmap
+
+| Version | Features | Status |
+|---------|----------|--------|
+| **v2.0** | Integrated PXF fixes, reorganized architecture | ✅ **Current** |
+| **v2.1** | Kubernetes deployment support | 🔄 **In Progress** |
+| **v2.2** | Multi-cloud provider support | 📋 **Planned** |
+| **v3.0** | Web-based management interface | 💭 **Future** |
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+<div align="center">
+
+**🌟 Star this repository if it helps you!**
+
+Made with ❤️ for the data community
+
+[⬆️ Back to Top](#-enterprise-database--data-platform-installer-suite)
+
+</div>

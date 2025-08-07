@@ -16,6 +16,7 @@ PHASES=(
     "Pre-flight Checks:8"
     "Host Setup:2"
     "Greenplum Installation:4"
+    "PXF Installation:4"
     "Completion:1"
 )
 
@@ -38,6 +39,7 @@ source "$LIB_DIR/validation.sh"
 source "$LIB_DIR/system.sh"
 source "$LIB_DIR/ssh.sh"
 source "$LIB_DIR/greenplum.sh"
+source "$LIB_DIR/pxf.sh"
 
 # Function to show help
 show_help() {
@@ -260,7 +262,116 @@ phase_greenplum_installation() {
     touch "$STATE_DIR/.step_phase_greenplum_installation"
 }
 
-# Phase 5: Completion
+# Phase 5: PXF Installation
+phase_pxf_installation() {
+    if [ -f "$STATE_DIR/.step_phase_pxf_installation" ]; then
+        log_info "PXF Installation phase already completed, skipping."
+        return
+    fi
+    
+    # Check if PXF should be installed
+    if ! should_install_pxf; then
+        log_info "PXF installation skipped (not configured or PXF installer not found)"
+        touch "$STATE_DIR/.step_phase_pxf_installation"
+        return
+    fi
+    
+    report_phase_start 5 "PXF Installation"
+    
+    local all_hosts=($(get_all_hosts))
+    
+    # Ensure SSH connections are still available
+    ensure_ssh_connections "${all_hosts[@]}"
+    
+    increment_step
+    report_progress "PXF Installation" $CURRENT_STEP 4 "Finding PXF installer"
+    log_info "Looking for PXF installer in '$INSTALL_FILES_DIR'..."
+    
+    # Find PXF installer (separate from logging to avoid output capture)
+    local pxf_installer_file
+    if ! pxf_installer_file=$(find_pxf_installer "$INSTALL_FILES_DIR"); then
+        log_warn "PXF installer not found, skipping PXF installation"
+        touch "$STATE_DIR/.step_phase_pxf_installation"
+        return
+    fi
+    
+    # Verify we got a clean file path (no log contamination)
+    if [[ "$pxf_installer_file" == *"[INFO]"* ]] || [[ "$pxf_installer_file" == *$'\033'* ]]; then
+        log_error "PXF installer path contaminated with log output: $pxf_installer_file"
+        return 1
+    fi
+    
+    log_success "Found PXF installer: $pxf_installer_file"
+    
+    increment_step
+    report_progress "PXF Installation" $CURRENT_STEP 4 "Installing PXF binaries (root operations)"
+    
+    # Group all ROOT operations together to minimize password prompts
+    log_info "Performing all root-level PXF operations..."
+    
+    # 1. Distribute installer
+    distribute_pxf_installer "$pxf_installer_file" "${all_hosts[@]}"
+    
+    # 2. Install PXF binaries
+    install_pxf_binaries "${all_hosts[@]}" "$pxf_installer_file"
+    
+    # 3. Configure PXF services on all hosts  
+    for host in "${all_hosts[@]}"; do
+        configure_pxf_service "$host" "$SUDO_PASSWORD"
+    done
+    
+    # 4. Setup PXF environment
+    setup_pxf_environment "${all_hosts[@]}"
+    
+    # 5. Setup Java environment on all hosts (critical for PXF)
+    log_info "Setting up Java environment for PXF on all hosts..."
+    setup_java_environment "${all_hosts[@]}"
+    
+    # 6. Fix PXF directory ownership on all hosts
+    log_info "Setting PXF directory ownership..."
+    for host in "${all_hosts[@]}"; do
+        ssh_execute "$host" "chown -R gpadmin:gpadmin /usr/local/pxf-gp7" "" "false" "root"
+    done
+    
+    log_success "All root-level PXF operations completed"
+    
+    increment_step
+    report_progress "PXF Installation" $CURRENT_STEP 4 "PXF cluster setup (gpadmin operations)" 
+    
+    # Refresh SSH connections before gpadmin operations
+    refresh_ssh_connections "${all_hosts[@]}"
+    
+    # Group all GPADMIN operations together to minimize password prompts
+    log_info "Performing all gpadmin-level PXF operations..."
+    
+    # 1. Verify Greenplum is ready for PXF (as gpadmin)
+    verify_greenplum_for_pxf "$GPDB_COORDINATOR_HOST"
+    
+    # 2. Initialize PXF cluster
+    initialize_pxf_cluster "$GPDB_COORDINATOR_HOST"
+    
+    # 2a. Distribute PXF extension files to all hosts (needed for segments)
+    distribute_pxf_extension_files "${all_hosts[@]}"
+    
+    # 3. Enable PXF extension in database
+    enable_pxf_extension "$GPDB_COORDINATOR_HOST" "tdi"
+    
+    # 4. Test PXF installation
+    test_pxf_installation "$GPDB_COORDINATOR_HOST"
+    
+    increment_step
+    report_progress "PXF Installation" $CURRENT_STEP 4 "Verifying PXF configuration"
+    
+    # Verify and fix PXF configuration (integrated from fix scripts)
+    verify_and_fix_pxf_configuration "$GPDB_COORDINATOR_HOST"
+    
+    log_success "All gpadmin-level PXF operations completed"
+    
+    report_phase_complete "PXF Installation"
+    touch "$STATE_DIR/.step_phase_pxf_installation"
+}
+
+# Phase 6: Completion
 phase_completion() {
     if [ -f "$STATE_DIR/.step_phase_completion" ]; then
         log_info "Completion phase already completed, skipping."
@@ -275,7 +386,7 @@ phase_completion() {
     log_info "Performing final cluster verification..."
     
     # Check if cluster is running
-    if ssh_execute "$GPDB_COORDINATOR_HOST" "sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'" "" "30" "true" 2>/dev/null; then
+    if ssh_execute "$GPDB_COORDINATOR_HOST" "sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'" "30" "true" 2>/dev/null; then
         log_success "✅ Cluster status check passed"
         
         # Test database connectivity
@@ -292,6 +403,14 @@ phase_completion() {
             log_info "Check cluster status: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'gpstate -s'"
             log_info "Stop cluster: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'gpstop -a'"
             log_info "Start cluster: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'gpstart -a'"
+            echo ""
+            # Check if PXF was installed
+            if [ -f "$STATE_DIR/.step_phase_pxf_installation" ]; then
+                log_info "=== PXF (Platform Extension Framework) ==="
+                log_info "PXF Status: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'pxf cluster status'"
+                log_info "PXF Start: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'pxf cluster start'"
+                log_info "PXF Stop: ssh $GPDB_COORDINATOR_HOST -l gpadmin 'pxf cluster stop'"
+            fi
         else
             log_warn "⚠️ Cluster is running but connectivity test failed"
             log_info "The cluster may be initializing. Try connecting manually:"
@@ -316,20 +435,61 @@ collect_credentials() {
     log_info "SSH Access Configuration:"
     echo "  Target hosts: $(get_all_hosts)"
     echo ""
-    read -p "Do all hosts use the same SSH password for root? (y/n) [y]: " same_ssh_password
+    echo "💡 Password Reuse: The installer can store your root password securely in memory"
+    echo "   and reuse it across all servers to avoid repeated prompts."
+    echo ""
+    read -p "Do all hosts use the same SSH password for root user? (y/n) [y]: " same_ssh_password
     same_ssh_password=${same_ssh_password:-y}
     
     if [[ "$same_ssh_password" =~ ^[Yy]$ ]]; then
-        read -s -p "Enter SSH password for all hosts: " SSH_PASSWORD
+        read -s -p "Enter SSH password for root user (will be reused for all hosts): " SSH_PASSWORD
         echo ""
         if [ -z "$SSH_PASSWORD" ]; then
             log_error "SSH password cannot be empty"
         fi
         export SSH_PASSWORD
         export SSHPASS="$SSH_PASSWORD"
-        log_success "SSH password will be used for all hosts"
+        log_success "✅ SSH password stored securely - will be reused for all hosts"
+        
+        # Check/install sshpass for automated authentication
+        if ! command -v sshpass >/dev/null 2>&1; then
+            log_info "Installing sshpass for seamless password authentication..."
+            # Try different package managers
+            sshpass_installed=false
+            if command -v yum >/dev/null 2>&1; then
+                if sudo yum install -y sshpass 2>/dev/null; then
+                    log_success "✅ sshpass installed via yum"
+                    sshpass_installed=true
+                fi
+            elif command -v dnf >/dev/null 2>&1; then
+                if sudo dnf install -y sshpass 2>/dev/null; then
+                    log_success "✅ sshpass installed via dnf"
+                    sshpass_installed=true
+                fi
+            elif command -v apt-get >/dev/null 2>&1; then
+                if sudo apt-get update && sudo apt-get install -y sshpass 2>/dev/null; then
+                    log_success "✅ sshpass installed via apt-get"
+                    sshpass_installed=true
+                fi
+            elif command -v brew >/dev/null 2>&1; then
+                log_info "Using Homebrew to install sshpass (this may take a moment)..."
+                if brew install sshpass; then
+                    log_success "✅ sshpass installed via Homebrew"
+                    sshpass_installed=true
+                else
+                    log_warn "Homebrew install failed, trying alternative..."
+                fi
+            fi
+            
+            if [ "$sshpass_installed" = false ]; then
+                log_warn "⚠️  Could not install sshpass automatically - you may be prompted for passwords occasionally"
+                log_info "To install manually: sudo yum install sshpass (RHEL/CentOS) or sudo apt-get install sshpass (Ubuntu/Debian)"
+            fi
+        else
+            log_success "✅ sshpass available - fully automated password authentication enabled"
+        fi
     else
-        log_warn "SSH password collection disabled - you'll be prompted for each connection"
+        log_warn "❌ Password reuse disabled - you'll be prompted for each connection"
         unset SSH_PASSWORD
         unset SSHPASS
     fi
@@ -576,6 +736,7 @@ main() {
     phase_preflight_checks
     phase_host_setup
     phase_greenplum_installation
+    phase_pxf_installation
     phase_completion
     
     log_success_with_timestamp "Installation completed successfully!"

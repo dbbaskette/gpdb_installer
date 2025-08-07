@@ -137,7 +137,7 @@ install_greenplum_single() {
     local remote_script="
         set -e
         echo \"Installing Greenplum dependencies...\"
-        echo '$sudo_password' | sudo -S dnf install -y apr apr-util krb5-devel libevent-devel perl python3-psycopg2 python3.11 readline-devel 2>/dev/null || echo '$sudo_password' | sudo -S yum install -y apr apr-util krb5-devel libevent-devel perl python3-psycopg2 python3.11 readline-devel
+        echo '$sudo_password' | sudo -S dnf install -y apr apr-util krb5-devel libevent-devel perl python3-psycopg2 python3.11 readline-devel java-11-openjdk-devel 2>/dev/null || echo '$sudo_password' | sudo -S yum install -y apr apr-util krb5-devel libevent-devel perl python3-psycopg2 python3.11 readline-devel java-11-openjdk-devel
         
         echo \"Installing Greenplum...\"
         if echo '$sudo_password' | sudo -S rpm -q greenplum-db-7 2>/dev/null; then
@@ -414,11 +414,11 @@ GPINIT_EOF
         log_info "Checking if cluster was actually created successfully..."
         
         # Check if cluster is running despite timeout
-        if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'" "" "30" "true" 2>/dev/null; then
+        if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c 'source ~/.bashrc && gpstate -s'" "30" "true" 2>/dev/null; then
             log_success "Cluster appears to be running successfully despite timeout"
         else
             log_info "Attempting to start cluster..."
-            if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c 'source $GPHOME/greenplum_path.sh && gpstart -a'" "" "60" "true" 2>/dev/null; then
+            if ssh_execute "$coordinator_host" "sudo -u gpadmin bash -c 'source $GPHOME/greenplum_path.sh && gpstart -a'" "60" "true" 2>/dev/null; then
                 log_success "Cluster started successfully"
             else
                 log_error "gpinitsystem failed - cluster is not running"
