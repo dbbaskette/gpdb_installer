@@ -47,6 +47,9 @@ graph TB
         SYS[🖥️ system.sh<br/>OS Operations]
         GPLIB[🐘 greenplum.sh<br/>GP-specific Functions]
         PXF[🔌 pxf.sh<br/>PXF Integration]
+        MADLIB[📦 madlib.sh<br/>MADlib Installer]
+        POSTGIS[🌍 postgis.sh<br/>PostGIS Installer]
+        SPARK[⚡ spark.sh<br/>Spark Connector]
         ERR[🚨 error_handling.sh<br/>Fault Management]
     end
     
@@ -65,6 +68,9 @@ graph TB
     GP --> LOG
     GP --> GPLIB
     GP --> PXF
+    GP --> MADLIB
+    GP --> POSTGIS
+    GP --> SPARK
     
     OM --> CONFIG
     OM --> SSH

@@ -35,6 +35,24 @@ GPADMIN_PASSWORD="your-secure-gpadmin-password-here"
 # If not set, installer will auto-detect based on presence of PXF RPM in files/ directory
 INSTALL_PXF="true"
 
+# MADlib Configuration
+# Set to "true" to install MADlib automatically, "false" to skip
+# If not set, installer will auto-detect based on presence of MADlib RPM in files/ directory
+INSTALL_MADLIB="false"
+
+# PostGIS Configuration
+# Set to "true" to install PostGIS automatically, "false" to skip
+# If not set, installer will auto-detect based on presence of PostGIS RPM in files/ directory
+INSTALL_POSTGIS="false"
+
+# Spark Connector Configuration
+# Set to "true" to install the Greenplum Spark Connector, "false" to skip
+# If not set, installer will auto-detect based on presence of connector tarball in files/ directory
+INSTALL_SPARK_CONNECTOR="false"
+
+# Optional database name where extensions will be enabled (defaults to tdi)
+DATABASE_NAME="tdi"
+
 # Example configurations:
 #
 # Single Node Setup:

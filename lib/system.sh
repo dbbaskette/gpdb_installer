@@ -149,6 +149,67 @@ check_dependencies() {
     done
 }
 
+# Function to check sudo/root privileges on remote hosts (instead of local)
+check_remote_sudo_privileges() {
+    local hosts=("$@")
+    log_info "Checking remote sudo/root privileges on all hosts..."
+
+    local failed_hosts=()
+    for host in "${hosts[@]}"; do
+        log_info "Validating privileges on $host..."
+        # Remote script: success if root; else if sudo present and works (non-interactive), or with provided password
+        local remote_script="
+            set -e
+            # If running as root, privileges are sufficient
+            if [ "$(id -u)" -eq 0 ]; then
+                echo 'User is root on this host; sudo not required'
+                exit 0
+            fi
+
+            # Ensure sudo is installed
+            if ! command -v sudo >/dev/null 2>&1; then
+                echo 'sudo not found on this host'
+                exit 2
+            fi
+
+            # Try passwordless sudo first
+            if sudo -n true 2>/dev/null; then
+                echo 'Passwordless sudo is available'
+                exit 0
+            fi
+
+            # Try with provided password if available
+            if [ -n '"${SUDO_PASSWORD}"' ]; then
+                if echo '"${SUDO_PASSWORD}"' | sudo -S -k -p '' true 2>/dev/null; then
+                    echo 'Sudo validated with provided password'
+                    exit 0
+                else
+                    echo 'Sudo password validation failed'
+                    exit 3
+                fi
+            fi
+
+            echo 'Sudo not available non-interactively and no password provided'
+            exit 4
+        "
+
+        if ssh_execute "$host" "$remote_script" "15" "true"; then
+            log_success "Privileges validated on $host"
+        else
+            log_error "Insufficient privileges or sudo missing on $host"
+            failed_hosts+=("$host")
+        fi
+    done
+
+    if [ ${#failed_hosts[@]} -gt 0 ]; then
+        log_error "Remote sudo/root privilege check failed on: ${failed_hosts[*]}"
+        return 1
+    fi
+
+    log_success "Remote sudo/root privilege checks passed on all hosts"
+    return 0
+}
+
 # Function to check network connectivity between hosts
 check_network_connectivity() {
     local hosts=("$@")

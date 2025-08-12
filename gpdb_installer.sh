@@ -17,6 +17,7 @@ PHASES=(
     "Host Setup:2"
     "Greenplum Installation:4"
     "PXF Installation:4"
+    "Extensions Installation:4"
     "Completion:1"
 )
 
@@ -25,6 +26,10 @@ RESET_STATE=false
 
 # Add CLEAN_MODE as a global variable
 CLEAN_MODE=false
+EXTENSIONS_ONLY=false
+CLI_INSTALL_MADLIB=false
+CLI_INSTALL_POSTGIS=false
+CLI_INSTALL_SPARK_CONNECTOR=false
 
 # GPHOME will be set dynamically after detecting Greenplum version
 # This ensures compatibility with official installation practices
@@ -40,6 +45,9 @@ source "$LIB_DIR/system.sh"
 source "$LIB_DIR/ssh.sh"
 source "$LIB_DIR/greenplum.sh"
 source "$LIB_DIR/pxf.sh"
+source "$LIB_DIR/madlib.sh"
+source "$LIB_DIR/postgis.sh"
+source "$LIB_DIR/spark.sh"
 
 # Function to show help
 show_help() {
@@ -54,6 +62,10 @@ OPTIONS:
     --force         Force a fresh install (clear state markers)
     --reset         Alias for --force
     --clean         Remove Greenplum and all data directories from all hosts, then exit
+    --install-madlib            Install MADlib only (skips GP/PXF phases)
+    --install-postgis          Install PostGIS only (skips GP/PXF phases)
+    --install-spark-connector  Install Greenplum Spark Connector only (skips GP/PXF phases)
+    --extensions-only          Run only the extensions phase (honors config flags)
 
 EXAMPLES:
     $0                    # Run with default configuration
@@ -101,6 +113,28 @@ parse_arguments() {
                 ;;
             --clean)
                 CLEAN_MODE=true
+                shift
+                ;;
+            --install-madlib)
+                INSTALL_MADLIB=true
+                CLI_INSTALL_MADLIB=true
+                EXTENSIONS_ONLY=true
+                shift
+                ;;
+            --install-postgis)
+                INSTALL_POSTGIS=true
+                CLI_INSTALL_POSTGIS=true
+                EXTENSIONS_ONLY=true
+                shift
+                ;;
+            --install-spark-connector)
+                INSTALL_SPARK_CONNECTOR=true
+                CLI_INSTALL_SPARK_CONNECTOR=true
+                EXTENSIONS_ONLY=true
+                shift
+                ;;
+            --extensions-only)
+                EXTENSIONS_ONLY=true
                 shift
                 ;;
             *)
@@ -173,8 +207,8 @@ phase_preflight_checks() {
     establish_ssh_connections "${all_hosts[@]}"
     
     increment_step
-    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking privileges"
-    check_sudo_privileges
+    report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking privileges on remote hosts"
+    check_remote_sudo_privileges "${all_hosts[@]}"
     
     increment_step
     report_progress "Pre-flight Checks" $CURRENT_STEP 8 "Checking OS compatibility"
@@ -371,7 +405,76 @@ phase_pxf_installation() {
     touch "$STATE_DIR/.step_phase_pxf_installation"
 }
 
-# Phase 6: Completion
+# Phase 6: Extensions (MADlib, PostGIS, Spark Connector)
+phase_extensions_installation() {
+    if [ -f "$STATE_DIR/.step_phase_extensions_installation" ]; then
+        log_info "Extensions Installation phase already completed, skipping."
+        return
+    fi
+
+    report_phase_start 6 "Extensions Installation"
+
+    local all_hosts=($(get_all_hosts))
+
+    # Ensure SSH connections are still available
+    ensure_ssh_connections "${all_hosts[@]}"
+
+    # MADlib
+    if should_install_madlib && { [ "$EXTENSIONS_ONLY" != true ] || [ "$CLI_INSTALL_MADLIB" = true ]; }; then
+        increment_step
+        report_progress "Extensions Installation" $CURRENT_STEP 4 "Installing MADlib"
+        local madlib_installer
+        if madlib_installer=$(find_madlib_installer "$INSTALL_FILES_DIR"); then
+            distribute_madlib_installer "$madlib_installer" "${all_hosts[@]}"
+            install_madlib_binaries "${all_hosts[@]}" "$madlib_installer"
+            enable_madlib_extension "$GPDB_COORDINATOR_HOST" "${DATABASE_NAME:-tdi}"
+            verify_madlib_installation "$GPDB_COORDINATOR_HOST" "${DATABASE_NAME:-tdi}"
+        else
+            log_warn "MADlib installer not found; skipping"
+        fi
+    else
+        log_info "MADlib installation skipped"
+    fi
+
+    # PostGIS
+    if should_install_postgis && { [ "$EXTENSIONS_ONLY" != true ] || [ "$CLI_INSTALL_POSTGIS" = true ]; }; then
+        increment_step
+        report_progress "Extensions Installation" $CURRENT_STEP 4 "Installing PostGIS"
+        local postgis_installer
+        if postgis_installer=$(find_postgis_installer "$INSTALL_FILES_DIR"); then
+            distribute_postgis_installer "$postgis_installer" "${all_hosts[@]}"
+            install_postgis_binaries "${all_hosts[@]}" "$postgis_installer"
+            enable_postgis_extension "$GPDB_COORDINATOR_HOST" "${DATABASE_NAME:-tdi}"
+            verify_postgis_installation "$GPDB_COORDINATOR_HOST" "${DATABASE_NAME:-tdi}"
+        else
+            log_warn "PostGIS installer not found; skipping"
+        fi
+    else
+        log_info "PostGIS installation skipped"
+    fi
+
+    # Spark Connector
+    if should_install_spark_connector && { [ "$EXTENSIONS_ONLY" != true ] || [ "$CLI_INSTALL_SPARK_CONNECTOR" = true ]; }; then
+        increment_step
+        report_progress "Extensions Installation" $CURRENT_STEP 4 "Installing Spark Connector"
+        local spark_tarball
+        if spark_tarball=$(find_spark_connector_tarball "$INSTALL_FILES_DIR"); then
+            distribute_spark_connector "$spark_tarball" "${all_hosts[@]}"
+            install_spark_connector_binaries "${all_hosts[@]}" "$spark_tarball"
+            setup_spark_connector_environment "${all_hosts[@]}"
+            verify_spark_connector_installation "$GPDB_COORDINATOR_HOST"
+        else
+            log_warn "Spark Connector tarball not found; skipping"
+        fi
+    else
+        log_info "Spark Connector installation skipped"
+    fi
+
+    report_phase_complete "Extensions Installation"
+    touch "$STATE_DIR/.step_phase_extensions_installation"
+}
+
+# Phase 7: Completion
 phase_completion() {
     if [ -f "$STATE_DIR/.step_phase_completion" ]; then
         log_info "Completion phase already completed, skipping."
@@ -732,12 +835,20 @@ main() {
     fi
     
     # Execute installation phases
-    phase_initialization
-    phase_preflight_checks
-    phase_host_setup
-    phase_greenplum_installation
-    phase_pxf_installation
-    phase_completion
+    if [ "$EXTENSIONS_ONLY" = true ]; then
+        phase_initialization
+        phase_preflight_checks
+        phase_extensions_installation
+        phase_completion
+    else
+        phase_initialization
+        phase_preflight_checks
+        phase_host_setup
+        phase_greenplum_installation
+        phase_pxf_installation
+        phase_extensions_installation
+        phase_completion
+    fi
     
     log_success_with_timestamp "Installation completed successfully!"
     

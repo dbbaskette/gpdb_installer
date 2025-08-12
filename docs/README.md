@@ -14,6 +14,7 @@ A comprehensive automation suite for installing Greenplum Database v7 and OpenMe
 - **Red Hat Linux Compatible**: Optimized for RHEL/CentOS/Rocky Linux systems
 - **Remote Deployment**: Push scripts to remote servers via SSH
 - **GitHub Integration**: Create releases and upload packages automatically
+- **Optional Extensions**: Install and enable MADlib, PostGIS, and the Greenplum Spark Connector
 
 ### OpenMetadata Installer
 - **Docker-Based Installation**: Automated Docker and Docker Compose installation
@@ -65,6 +66,11 @@ Create the `files` directory and place your Greenplum installer:
 mkdir -p files
 # Copy your Greenplum installer to the files directory
 # Example: greenplum-db-7.0.0-el7-x86_64.rpm
+
+# Optional extensions (auto-detected if present or install can be forced via config):
+# - MADlib RPM (e.g., madlib-oss-gp7-*.rpm)
+# - PostGIS RPM (e.g., postgis-gp7-*.rpm)
+# - Spark Connector tarball (e.g., greenplum-connector-apache-spark-scala_2.12-*.tar.gz)
 ```
 
 ### 2. Test Red Hat Compatibility (Optional)
@@ -224,6 +230,13 @@ GPDB_STANDBY_HOST="standby.example.com"
 GPDB_SEGMENT_HOSTS=(sdw1 sdw2 sdw3)
 GPDB_INSTALL_DIR="/usr/local/greenplum-db"
 GPDB_DATA_DIR="/data/primary"
+
+# Optional components
+INSTALL_PXF=true
+INSTALL_MADLIB=false
+INSTALL_POSTGIS=false
+INSTALL_SPARK_CONNECTOR=false
+DATABASE_NAME="tdi"
 ```
 
 Example `openmetadata_config.conf` configuration:
